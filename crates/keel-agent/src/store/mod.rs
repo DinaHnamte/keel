@@ -91,6 +91,7 @@ impl Store {
     pub fn open(path: &Path) -> Result<Store> {
         let conn = Connection::open(path)
             .with_context(|| format!("opening database {}", path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         Self::init(conn)
     }
@@ -273,5 +274,30 @@ mod tests {
             .unwrap();
         let (_, ps) = s.find_user_by_fingerprint("fp").unwrap().unwrap();
         assert_eq!(ps, vec![keel_proto::ProjectId(1)]);
+    }
+
+    #[test]
+    fn concurrent_redeem_single_use() {
+        let p = tmp_db();
+        let s = Store::open(&p).unwrap();
+        s.create_pairing_token(&[7; 32], Role::Owner, 1000).unwrap();
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let s = s.clone();
+                std::thread::spawn(move || {
+                    s.redeem_pairing_token(&[7; 32], &format!("fp{i}"), "U", 10)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert!(
+            results
+                .iter()
+                .filter_map(|r| r.as_ref().err())
+                .all(|e| matches!(e, RedeemError::Used))
+        );
+        assert_eq!(s.list_users().unwrap().len(), 1);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 }
