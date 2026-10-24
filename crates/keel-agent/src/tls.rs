@@ -16,7 +16,7 @@ use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -51,6 +51,16 @@ pub fn load_or_create_identity(dir: &Path) -> Result<AgentIdentity> {
     let cert_path = dir.join(CERT_FILE);
     match (key_path.exists(), cert_path.exists()) {
         (true, true) => {
+            if let Ok(meta) = fs::metadata(&key_path) {
+                let mode = meta.permissions().mode() & 0o777;
+                if mode & 0o077 != 0 {
+                    tracing::warn!(
+                        path = ?key_path,
+                        mode = format!("{mode:o}"),
+                        "agent.key is readable by group or others; it should be mode 600"
+                    );
+                }
+            }
             let key_der = fs::read(&key_path).with_context(|| format!("reading {key_path:?}"))?;
             let cert_der =
                 fs::read(&cert_path).with_context(|| format!("reading {cert_path:?}"))?;
@@ -68,8 +78,7 @@ pub fn load_or_create_identity(dir: &Path) -> Result<AgentIdentity> {
         (false, false) => {
             create_dir_private(dir)?;
             let id = generate()?;
-            write_atomic(dir, KEY_FILE, &id.key_der)?;
-            write_atomic(dir, CERT_FILE, &id.cert_der)?;
+            install_pair(dir, &id.key_der, &id.cert_der)?;
             Ok(id)
         }
         (true, false) => bail!(
@@ -111,8 +120,8 @@ fn create_dir_private(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Write `bytes` to `dir/name` via a temp file created with mode 0600, then rename.
-fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+/// Create a temp file with mode 0600 at creation, write and fsync it.
+fn write_temp(dir: &Path, name: &str, bytes: &[u8]) -> Result<std::path::PathBuf> {
     let tmp = dir.join(format!(".{name}.tmp"));
     // A stale temp file from a crashed run is safe to discard.
     let _ = fs::remove_file(&tmp);
@@ -124,8 +133,17 @@ fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("creating {tmp:?}"))?;
     f.write_all(bytes)?;
     f.sync_all()?;
-    drop(f);
-    fs::rename(&tmp, dir.join(name)).with_context(|| format!("installing {name}"))?;
+    Ok(tmp)
+}
+
+/// Install key and cert with the smallest possible crash window: both temp
+/// files are written and fsynced first, then renamed (key, then cert), then
+/// the directory is fsynced.
+fn install_pair(dir: &Path, key: &[u8], cert: &[u8]) -> Result<()> {
+    let key_tmp = write_temp(dir, KEY_FILE, key)?;
+    let cert_tmp = write_temp(dir, CERT_FILE, cert)?;
+    fs::rename(&key_tmp, dir.join(KEY_FILE)).context("installing agent.key")?;
+    fs::rename(&cert_tmp, dir.join(CERT_FILE)).context("installing agent.crt")?;
     fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
@@ -237,7 +255,6 @@ pub fn peer_fingerprint(conn: &rustls::ServerConnection) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use tokio::net::{TcpListener, TcpStream};
 
@@ -315,6 +332,65 @@ mod tests {
             None => b.with_no_client_auth(),
         };
         Arc::new(cfg)
+    }
+
+    /// Presents cert A but signs with key B.
+    #[derive(Debug)]
+    struct MismatchedResolver(Arc<rustls::sign::CertifiedKey>);
+    impl rustls::client::ResolvesClientCert for MismatchedResolver {
+        fn resolve(
+            &self,
+            _: &[&[u8]],
+            _: &[rustls::SignatureScheme],
+        ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+            Some(self.0.clone())
+        }
+        fn has_certs(&self) -> bool {
+            true
+        }
+    }
+
+    fn mismatched_client_config(cert_a: Vec<u8>, key_b: Vec<u8>) -> Arc<rustls::ClientConfig> {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let signing_key = provider
+            .key_provider
+            .load_private_key(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_b)))
+            .unwrap();
+        let ck = rustls::sign::CertifiedKey::new(vec![CertificateDer::from(cert_a)], signing_key);
+        let cfg = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyServer))
+            .with_client_cert_resolver(Arc::new(MismatchedResolver(Arc::new(ck))));
+        Arc::new(cfg)
+    }
+
+    #[tokio::test]
+    async fn handshake_rejects_cert_without_matching_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = load_or_create_identity(dir.path()).unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(server_config(&id).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            acceptor
+                .accept(tcp)
+                .await
+                .map(|s| peer_fingerprint(s.get_ref().1))
+        });
+
+        let (cert_a, _key_a) = self_signed();
+        let (_cert_b, key_b) = self_signed();
+        let c = tokio_rustls::TlsConnector::from(mismatched_client_config(cert_a, key_b));
+        let name = rustls::pki_types::ServerName::try_from("keel-agent").unwrap();
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let _ = c.connect(name, tcp).await;
+
+        let res = server.await.unwrap();
+        assert!(res.is_err(), "impersonation must fail, got {res:?}");
     }
 
     #[derive(Debug)]
