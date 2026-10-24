@@ -24,6 +24,7 @@ use crate::config::AgentConfig;
 use crate::handlers::{
     self, MSG_INTERNAL, MSG_MALFORMED, MSG_TOO_LARGE, MSG_UNSUPPORTED_PROTOCOL, error,
 };
+use crate::reconcile::{DataDirReconciler, Reconciler, spawn_reconcile_loop};
 use crate::store::Store;
 use crate::tls::{load_or_create_identity, peer_fingerprint, server_config};
 
@@ -176,12 +177,26 @@ impl RateLimiter {
     }
 }
 
+/// How often the reconcile loop converges reality on the desired state.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Bind `cfg.listen` and serve until `shutdown` completes.
 pub async fn run(cfg: AgentConfig, clock: Clock, shutdown: impl Future<Output = ()>) -> Result<()> {
     let listener = TcpListener::bind(cfg.listen)
         .await
         .with_context(|| format!("could not listen on {}", cfg.listen))?;
-    serve(listener, cfg, clock, shutdown).await
+    // Keep the data directory private, now and every minute. The loop uses
+    // its own connection so the server's critical sections stay short.
+    std::fs::create_dir_all(&cfg.data_dir)
+        .with_context(|| format!("could not create {}", cfg.data_dir.display()))?;
+    let store = Store::open(&cfg.data_dir.join("keel.db"))?;
+    let reconcilers: Vec<Box<dyn Reconciler>> = vec![Box::new(DataDirReconciler {
+        data_dir: cfg.data_dir.clone(),
+    })];
+    let reconcile = spawn_reconcile_loop(store, reconcilers, RECONCILE_INTERVAL);
+    let result = serve(listener, cfg, clock, shutdown).await;
+    reconcile.abort();
+    result
 }
 
 pub async fn serve(
