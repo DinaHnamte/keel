@@ -7,6 +7,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use keel_proto::spki_fingerprint;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -88,7 +89,7 @@ struct Stored {
 #[derive(Clone)]
 pub struct DeviceIdentity {
     pub cert_der: Vec<u8>,
-    pub key_der: Vec<u8>,
+    pub key_der: Zeroizing<Vec<u8>>,
     pub fingerprint: String,
 }
 
@@ -106,7 +107,7 @@ impl DeviceIdentity {
         if let Some(bytes) = kc.get(IDENTITY_KEY)? {
             let s: Stored = serde_json::from_slice(&bytes)?;
             let cert_der = STANDARD.decode(s.cert_der_b64)?;
-            let key_der = STANDARD.decode(s.key_der_b64)?;
+            let key_der = Zeroizing::new(STANDARD.decode(s.key_der_b64)?);
             let fingerprint = spki_fingerprint(&cert_der)?;
             return Ok(DeviceIdentity {
                 cert_der,
@@ -117,11 +118,11 @@ impl DeviceIdentity {
         let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
         let cert = rcgen::CertificateParams::new(vec![])?.self_signed(&kp)?;
         let cert_der = cert.der().to_vec();
-        let key_der = kp.serialize_der();
+        let key_der = Zeroizing::new(kp.serialize_der());
         let fingerprint = spki_fingerprint(&cert_der)?;
         let stored = Stored {
             cert_der_b64: STANDARD.encode(&cert_der),
-            key_der_b64: STANDARD.encode(&key_der),
+            key_der_b64: STANDARD.encode(&*key_der),
         };
         kc.set(IDENTITY_KEY, &serde_json::to_vec(&stored)?)?;
         Ok(DeviceIdentity {
@@ -142,7 +143,7 @@ mod tests {
         let a = DeviceIdentity::load_or_create(&kc).unwrap();
         let b = DeviceIdentity::load_or_create(&kc).unwrap();
         assert_eq!(a.fingerprint, b.fingerprint);
-        assert_eq!(a.key_der, b.key_der);
+        assert_eq!(*a.key_der, *b.key_der);
         assert!(!a.fingerprint.is_empty());
     }
 

@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use keel_proto::{
-    ErrorCode, PROTOCOL_VERSION, Request, Response, read_frame, spki_fingerprint, write_frame,
+    ErrorCode, FrameError, PROTOCOL_VERSION, Request, Response, read_frame, spki_fingerprint,
+    write_frame,
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, ring};
@@ -53,6 +54,9 @@ pub enum ConnectError {
     /// The agent refused, with its own plain-language explanation.
     #[error("{0}")]
     Rejected(String),
+    /// The agent returned an error other than a pairing rejection.
+    #[error("{0}")]
+    Agent(String),
     #[error("{0}")]
     Io(String),
 }
@@ -127,6 +131,11 @@ impl ServerCertVerifier for PinnedVerifier {
 
 pub struct Connection {
     tls: TlsStream<TcpStream>,
+    /// Set after any I/O, decode or timeout failure. A late reply could
+    /// otherwise be read as the answer to the next request, so a broken
+    /// connection is never reused: callers reconnect.
+    broken: bool,
+    io_timeout: Duration,
 }
 
 fn unreachable_msg(host: &str, port: u16) -> String {
@@ -157,14 +166,14 @@ impl Connection {
         });
         let cfg = rustls::ClientConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(|e| ConnectError::Io(e.to_string()))?
+            .map_err(|_| tls_setup_error())?
             .dangerous()
             .with_custom_certificate_verifier(verifier.clone())
             .with_client_auth_cert(
                 vec![CertificateDer::from(id.cert_der.clone())],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(id.key_der.clone())),
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(id.key_der.to_vec())),
             )
-            .map_err(|e| ConnectError::Io(e.to_string()))?;
+            .map_err(|_| tls_setup_error())?;
 
         // The name is required by the API but never checked.
         let name = ServerName::try_from("keel-agent").expect("static name is valid");
@@ -183,10 +192,19 @@ impl Connection {
                     )),
                 });
             }
-            Err(_) => return Err(ConnectError::Unreachable(unreachable_msg(host, port))),
+            Err(_) => {
+                return Err(ConnectError::Io(
+                    "The server didn't finish setting up a secure connection. Try again, and check the agent is running."
+                        .to_string(),
+                ));
+            }
         };
 
-        let mut conn = Connection { tls };
+        let mut conn = Connection {
+            tls,
+            broken: false,
+            io_timeout: IO_TIMEOUT,
+        };
         let hello = conn
             .request(Request::Hello {
                 protocol: PROTOCOL_VERSION,
@@ -219,27 +237,60 @@ impl Connection {
         }
     }
 
+    /// Override the per-request timeout (tests).
+    #[doc(hidden)]
+    pub fn set_io_timeout(&mut self, d: Duration) {
+        self.io_timeout = d;
+    }
+
     /// Send one request and read its response. `NotPaired` becomes an error;
-    /// other agent errors come back as `Ok(Response::Error { .. })`.
+    /// other agent errors come back as `Ok(Response::Error { .. })`. After any
+    /// failure the connection is unusable and later calls fail immediately.
     pub async fn request(&mut self, req: Request) -> Result<Response, ConnectError> {
+        if self.broken {
+            return Err(lost());
+        }
         let io = async {
             write_frame(&mut self.tls, &req).await.map_err(|_| lost())?;
             read_frame::<_, Response>(&mut self.tls)
                 .await
-                .map_err(|_| lost())
+                .map_err(|e| match e {
+                    FrameError::Io(_) => lost(),
+                    FrameError::Malformed | FrameError::TooLarge => not_understood(),
+                })
         };
-        match timeout(IO_TIMEOUT, io).await {
-            Ok(Ok(Response::Error {
-                code: ErrorCode::NotPaired,
-                ..
-            })) => Err(ConnectError::NotPaired),
-            Ok(Ok(resp)) => Ok(resp),
-            Ok(Err(e)) => Err(e),
+        let result = match timeout(self.io_timeout, io).await {
+            Ok(r) => r,
             Err(_) => Err(ConnectError::Io(
                 "The server stopped responding. Check your connection and try again.".to_string(),
             )),
+        };
+        match result {
+            Ok(Response::Error {
+                code: ErrorCode::NotPaired,
+                ..
+            }) => Err(ConnectError::NotPaired),
+            Ok(resp) => Ok(resp),
+            Err(e) => {
+                self.broken = true;
+                Err(e)
+            }
         }
     }
+}
+
+fn not_understood() -> ConnectError {
+    ConnectError::Io(
+        "The server sent a reply this app doesn't understand. Update the app and the agent to the latest version."
+            .to_string(),
+    )
+}
+
+fn tls_setup_error() -> ConnectError {
+    ConnectError::Io(
+        "Couldn't prepare a secure connection on this device. Restart the app and try again."
+            .to_string(),
+    )
 }
 
 fn lost() -> ConnectError {
@@ -277,7 +328,11 @@ pub async fn pair(
             id: hello.server_id,
             ..probe
         }),
-        Response::Error { message, .. } => Err(ConnectError::Rejected(message)),
+        Response::Error {
+            code: ErrorCode::BadToken | ErrorCode::TokenExpired,
+            message,
+        } => Err(ConnectError::Rejected(message)),
+        Response::Error { message, .. } => Err(ConnectError::Agent(message)),
         _ => Err(ConnectError::Io(
             "The server sent an unexpected reply. Update the app or the server agent.".to_string(),
         )),

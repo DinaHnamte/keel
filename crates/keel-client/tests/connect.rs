@@ -1,6 +1,7 @@
 //! Runs a real agent in-process and connects with the client core.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use keel_agent::config::AgentConfig;
 use keel_agent::init::init;
@@ -170,10 +171,8 @@ async fn unpaired_device_gets_not_paired() {
 
 #[tokio::test]
 async fn connect_to_closed_port_is_unreachable() {
-    // Bind then drop to get a port nobody listens on.
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = l.local_addr().unwrap().port();
-    drop(l);
+    // Port 1 is privileged and nothing listens on it.
+    let port = 1;
     let rec = ServerRecord {
         id: "x".into(),
         name: "x".into(),
@@ -190,4 +189,75 @@ async fn connect_to_closed_port_is_unreachable() {
         }
         other => panic!("expected Unreachable, got {other:?}"),
     }
+}
+
+/// A pinned-TLS server that completes Hello and then answers every later
+/// request only after `delay`, so the client sees a timeout and a late reply.
+async fn slow_server(delay: std::time::Duration) -> (u16, String) {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    let cert = rcgen::CertificateParams::new(vec![])
+        .unwrap()
+        .self_signed(&kp)
+        .unwrap();
+    let fp = keel_proto::spki_fingerprint(cert.der()).unwrap();
+    let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![CertificateDer::from(cert.der().to_vec())],
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(kp.serialize_der())),
+    )
+    .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (tcp, _) = l.accept().await.unwrap();
+        let mut tls = acceptor.accept(tcp).await.unwrap();
+        let _: Request = keel_proto::read_frame(&mut tls).await.unwrap();
+        let hello = Response::HelloOk {
+            protocol: 1,
+            agent_version: "t".into(),
+            server_id: "slow".into(),
+        };
+        keel_proto::write_frame(&mut tls, &hello).await.unwrap();
+        while let Ok(_req) = keel_proto::read_frame::<_, Request>(&mut tls).await {
+            tokio::time::sleep(delay).await;
+            let _ = keel_proto::write_frame(&mut tls, &hello).await;
+        }
+    });
+    (port, fp)
+}
+
+#[tokio::test]
+async fn request_after_failure_fails_fast() {
+    let (port, fp) = slow_server(std::time::Duration::from_millis(300)).await;
+    let rec = ServerRecord {
+        id: "slow".into(),
+        name: "slow".into(),
+        host: "127.0.0.1".into(),
+        port,
+        fingerprint: fp,
+        ssh_saved: false,
+    };
+    let (mut conn, _) = Connection::open(&rec, &identity()).await.unwrap();
+    conn.set_io_timeout(std::time::Duration::from_millis(50));
+    assert!(matches!(
+        conn.request(Request::ServerStatus).await,
+        Err(ConnectError::Io(_))
+    ));
+    // Let the late reply arrive; it must never be read as the next answer.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    conn.set_io_timeout(std::time::Duration::from_secs(30));
+    let r = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        conn.request(Request::ServerStatus),
+    )
+    .await
+    .expect("must fail immediately, not hang");
+    assert!(matches!(r, Err(ConnectError::Io(_))));
 }
