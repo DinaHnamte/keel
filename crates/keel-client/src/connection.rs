@@ -131,8 +131,9 @@ impl ServerCertVerifier for PinnedVerifier {
 
 pub struct Connection {
     tls: TlsStream<TcpStream>,
-    /// Set after any I/O, decode or timeout failure. A late reply could
-    /// otherwise be read as the answer to the next request, so a broken
+    /// Set while a request is in flight and left set after any I/O, decode
+    /// or timeout failure, or if the request future was dropped. A late reply
+    /// could otherwise be read as the answer to the next request, so a broken
     /// connection is never reused: callers reconnect.
     broken: bool,
     io_timeout: Duration,
@@ -250,6 +251,10 @@ impl Connection {
         if self.broken {
             return Err(lost());
         }
+        // Poisoned until the exchange completes: if this future is dropped
+        // mid-flight (an outer timeout or select), a late reply may still be
+        // on the wire, so the connection must not be reused.
+        self.broken = true;
         let io = async {
             write_frame(&mut self.tls, &req).await.map_err(|_| lost())?;
             read_frame::<_, Response>(&mut self.tls)
@@ -265,16 +270,15 @@ impl Connection {
                 "The server stopped responding. Check your connection and try again.".to_string(),
             )),
         };
+        if result.is_ok() {
+            self.broken = false;
+        }
         match result {
             Ok(Response::Error {
                 code: ErrorCode::NotPaired,
                 ..
             }) => Err(ConnectError::NotPaired),
-            Ok(resp) => Ok(resp),
-            Err(e) => {
-                self.broken = true;
-                Err(e)
-            }
+            other => other,
         }
     }
 }

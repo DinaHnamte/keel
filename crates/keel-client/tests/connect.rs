@@ -261,3 +261,31 @@ async fn request_after_failure_fails_fast() {
     .expect("must fail immediately, not hang");
     assert!(matches!(r, Err(ConnectError::Io(_))));
 }
+
+#[tokio::test]
+async fn dropped_request_poisons_connection() {
+    let (port, fp) = slow_server(std::time::Duration::from_millis(300)).await;
+    let rec = ServerRecord {
+        id: "slow".into(),
+        name: "slow".into(),
+        host: "127.0.0.1".into(),
+        port,
+        fingerprint: fp,
+        ssh_saved: false,
+    };
+    let (mut conn, _) = Connection::open(&rec, &identity()).await.unwrap();
+    // An outer timeout drops the request future mid-flight; the connection's
+    // own timeout never fires.
+    let dropped = tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        conn.request(Request::ServerStatus),
+    )
+    .await;
+    assert!(dropped.is_err(), "outer timeout should have fired");
+    // Let the late reply arrive; it must never be read as the next answer.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let started = std::time::Instant::now();
+    let r = conn.request(Request::ServerStatus).await;
+    assert!(matches!(r, Err(ConnectError::Io(_))), "got {r:?}");
+    assert!(started.elapsed() < std::time::Duration::from_millis(100));
+}
