@@ -13,6 +13,7 @@ use russh::{ChannelMsg, Disconnect};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio::time::{Instant, sleep, timeout};
+use zeroize::Zeroizing;
 
 use super::install::{ExecOutput, Remote};
 
@@ -25,10 +26,10 @@ const MAX_OUTPUT: usize = 1 << 20;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SshAuth {
     PrivateKey {
-        pem: String,
-        passphrase: Option<String>,
+        pem: Zeroizing<String>,
+        passphrase: Option<Zeroizing<String>>,
     },
-    Password(String),
+    Password(Zeroizing<String>),
 }
 
 impl std::fmt::Debug for SshAuth {
@@ -57,7 +58,7 @@ pub fn generate_ssh_keypair() -> (String, String) {
 
 fn generate_ssh_keypair_for(device: &str) -> (String, String) {
     use ring::rand::{SecureRandom, SystemRandom};
-    let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+    let mut seed = Zeroizing::new([0u8; 32]);
     SystemRandom::new()
         .fill(&mut seed[..])
         .expect("the OS random number generator is available");
@@ -162,18 +163,25 @@ impl SshSession {
         };
         let result = match auth {
             SshAuth::PrivateKey { pem, passphrase } => {
-                let key = russh::keys::decode_secret_key(pem, passphrase.as_deref()).map_err(|e| {
+                let passphrase = passphrase.as_ref().map(|p| p.as_str());
+                let key = russh::keys::decode_secret_key(pem, passphrase).map_err(|e| {
                     tracing::debug!(error = %e, "could not decode private key");
                     anyhow!(
                         "The private key couldn't be read. Check it's an OpenSSH private key and that the passphrase is right."
                     )
                 })?;
-                let hash = self.handle.best_supported_rsa_hash().await?.flatten();
+                let hash = match self.handle.best_supported_rsa_hash().await {
+                    Ok(h) => h.flatten(),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "could not query rsa hash support");
+                        return Err(refused());
+                    }
+                };
                 self.handle
                     .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
                     .await
             }
-            SshAuth::Password(p) => self.handle.authenticate_password(user, p).await,
+            SshAuth::Password(p) => self.handle.authenticate_password(user, p.as_str()).await,
         };
         match result {
             Ok(r) if r.success() => Ok(()),
@@ -284,7 +292,16 @@ mod tests {
 
     #[test]
     fn auth_debug_hides_secrets() {
-        let a = SshAuth::Password("hunter2".into());
+        let a = SshAuth::Password(Zeroizing::new("hunter2".into()));
         assert!(!format!("{a:?}").contains("hunter2"));
+        let k = SshAuth::PrivateKey {
+            pem: Zeroizing::new("-----BEGIN secret".into()),
+            passphrase: Some(Zeroizing::new("pp".into())),
+        };
+        let shown = format!("{k:?}");
+        assert!(
+            !shown.contains("secret") && !shown.contains("pp"),
+            "{shown}"
+        );
     }
 }

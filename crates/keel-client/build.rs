@@ -34,7 +34,20 @@ fn main() {
 
     let profile = env::var("PROFILE").unwrap_or_default();
     let key = match env::var("KEEL_RELEASE_PUBKEY") {
-        Ok(v) if !v.trim().is_empty() => parse_hex_key(&v, "KEEL_RELEASE_PUBKEY"),
+        Ok(v) if !v.trim().is_empty() => {
+            let key = parse_hex_key(&v, "KEEL_RELEASE_PUBKEY");
+            if profile == "release" {
+                let dev = fs::read_to_string("dev-release.pub")
+                    .map(|t| parse_hex_key(&t, "dev-release.pub"))
+                    .ok();
+                if dev == Some(key) {
+                    panic!(
+                        "KEEL_RELEASE_PUBKEY is the committed dev key. Release builds must use the real release signing key."
+                    );
+                }
+            }
+            key
+        }
         _ if profile == "release" => panic!(
             "KEEL_RELEASE_PUBKEY is not set. Release builds must embed the release signing \
              public key (64 hex characters); the committed dev key is only for debug builds."

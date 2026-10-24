@@ -22,7 +22,11 @@ const AGENT_BIN: &str = "/usr/local/bin/keel-agent";
 const AGENT_BIN_NEW: &str = "/usr/local/bin/keel-agent.new";
 const UNIT_PATH: &str = "/etc/systemd/system/keel-agent.service";
 const UNIT_FILE: &str = include_str!("../../../keel-agent/dist/keel-agent.service");
-const SSHD_DROP_IN: &str = "/etc/ssh/sshd_config.d/50-keel.conf";
+/// sshd keeps the first value it reads for a setting, and drop-ins are read
+/// in name order, so ours must sort before cloud images' `50-cloud-init.conf`.
+const SSHD_DROP_IN: &str = "/etc/ssh/sshd_config.d/01-keel.conf";
+/// Where earlier versions wrote the drop-in.
+const SSHD_DROP_IN_OLD: &str = "/etc/ssh/sshd_config.d/50-keel.conf";
 const AUTO_UPGRADES_PATH: &str = "/etc/apt/apt.conf.d/20auto-upgrades";
 const AUTO_UPGRADES: &str =
     "APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n";
@@ -275,7 +279,8 @@ pub async fn install<R: Remote + Send>(
             facts.arch
         )));
     };
-    verify_agent_artifact(bin, sig, plan.pubkey).map_err(|e| StepFailed(e.to_string()))?;
+    verify_agent_artifact(bin, sig, plan.pubkey)
+        .map_err(|e| StepFailed(format!("Checking the agent: {e}")))?;
 
     // 3. Upload: write beside the target, check it arrived intact, then
     // rename over the old binary so a running agent never sees a partial file.
@@ -568,10 +573,28 @@ async fn disable_ssh_passwords<R: Remote>(
 ) -> Result<(), StepFailed> {
     const STEP: &str = "Turning off SSH passwords";
     emit(events, OnboardingEvent::Installing(STEP)).await;
+    let warn = |message: &str| {
+        OnboardingEvent::Findings(vec![Finding {
+            severity: Severity::Warning,
+            message: message.into(),
+        }])
+    };
+    // If the existing configuration is already broken, any reload could
+    // fail; leave every file as it is.
+    if run.try_root(STEP, "sshd -t", None).await?.0 != 0 {
+        emit(
+            events,
+            warn("Your current SSH configuration has errors, so Keel left it unchanged."),
+        )
+        .await;
+        return Ok(());
+    }
     let why = "Couldn't change the SSH settings.";
     run.root(STEP, why, "install -d -m 0755 /etc/ssh/sshd_config.d", None)
         .await?;
     run.write_file(STEP, why, SSHD_DROP_IN, b"PasswordAuthentication no\n")
+        .await?;
+    run.root(STEP, why, &format!("rm -f {SSHD_DROP_IN_OLD}"), None)
         .await?;
     // Never reload sshd with a config it rejects.
     if run.try_root(STEP, "sshd -t", None).await?.0 != 0 {
@@ -590,8 +613,21 @@ async fn disable_ssh_passwords<R: Remote>(
         ),
         None,
     )
-    .await
-    .map(|_| ())
+    .await?;
+    // Confirm the setting sshd actually uses.
+    let (code, out, _) = run.try_root(STEP, "sshd -T", None).await?;
+    let off = code == 0
+        && out
+            .lines()
+            .any(|l| l.trim().eq_ignore_ascii_case("passwordauthentication no"));
+    if !off {
+        emit(
+            events,
+            warn("SSH password sign-in is still on: Another SSH configuration file on this server overrides Keel's setting. Look for PasswordAuthentication in /etc/ssh/sshd_config and /etc/ssh/sshd_config.d/."),
+        )
+        .await;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -624,6 +660,8 @@ mod tests {
         rules: Vec<(String, i32, String)>,
         log: Vec<(String, Option<Vec<u8>>)>,
         reachable: bool,
+        /// The first `sshd -t` succeeds regardless of rules.
+        sshd_t_ok_first: bool,
     }
 
     impl Fake {
@@ -638,6 +676,7 @@ mod tests {
                 rules: Vec::new(),
                 log: Vec::new(),
                 reachable: true,
+                sshd_t_ok_first: false,
             };
             f.on("cat /etc/os-release", 0, os)
                 .on("uname -m", 0, "x86_64\n")
@@ -647,6 +686,7 @@ mod tests {
                 .on("command -v ufw", 0, "/usr/sbin/ufw\n")
                 .on("systemctl is-active", 3, "")
                 .on("printenv SSH_CONNECTION", 0, "10.0.0.9 50000 10.0.0.1 22\n")
+                .on("sshd -T", 0, "port 22\npasswordauthentication no\n")
                 .on(
                     "runuser",
                     0,
@@ -680,6 +720,10 @@ mod tests {
     impl Remote for Fake {
         async fn exec(&mut self, cmd: &str, stdin: Option<&[u8]>) -> anyhow::Result<ExecOutput> {
             self.log.push((cmd.to_string(), stdin.map(<[u8]>::to_vec)));
+            if cmd == "sshd -t" && self.sshd_t_ok_first {
+                self.sshd_t_ok_first = false;
+                return Ok((0, String::new(), String::new()));
+            }
             if cmd.contains("sha256sum") {
                 let bin = self
                     .log
@@ -1019,16 +1063,22 @@ mod tests {
         let (r, _) = go(&mut fake, opts(false, false, true), true, 22, &keys()).await;
         r.unwrap();
         let cmds = fake.cmds();
+        let pre = cmds.iter().position(|c| *c == "sshd -t").unwrap();
         let write = cmds
             .iter()
-            .position(|c| c.contains("cat > /etc/ssh/sshd_config.d/50-keel.conf"))
+            .position(|c| c.contains("cat > /etc/ssh/sshd_config.d/01-keel.conf"))
             .unwrap();
-        let test = cmds.iter().position(|c| *c == "sshd -t").unwrap();
+        let old = cmds
+            .iter()
+            .position(|c| *c == "rm -f /etc/ssh/sshd_config.d/50-keel.conf")
+            .unwrap();
+        let test = cmds.iter().rposition(|c| *c == "sshd -t").unwrap();
         let reload = cmds
             .iter()
             .position(|c| c.contains("systemctl reload ssh || systemctl reload sshd"))
             .unwrap();
-        assert!(write < test && test < reload);
+        let effective = cmds.iter().position(|c| *c == "sshd -T").unwrap();
+        assert!(pre < write && write < old && old < test && test < reload && reload < effective);
         assert_eq!(
             fake.log[write].1.as_deref(),
             Some(&b"PasswordAuthentication no\n"[..])
@@ -1038,12 +1088,61 @@ mod tests {
     #[tokio::test]
     async fn rejected_sshd_config_is_undone_and_not_reloaded() {
         let mut fake = Fake::server(UBUNTU, "", "0\n");
+        // Valid before the change, rejected after it.
         fake.on("sshd -t", 255, "");
+        fake.sshd_t_ok_first = true;
         let (r, _) = go(&mut fake, opts(false, false, true), true, 22, &keys()).await;
         assert!(r.unwrap_err().0.starts_with("Turning off SSH passwords: "));
         let cmds = fake.cmds();
-        assert!(cmds.contains(&"rm -f /etc/ssh/sshd_config.d/50-keel.conf"));
+        assert!(cmds.contains(&"rm -f /etc/ssh/sshd_config.d/01-keel.conf"));
         assert!(!cmds.iter().any(|c| c.contains("reload ssh")));
+    }
+
+    #[tokio::test]
+    async fn broken_existing_sshd_config_is_left_alone() {
+        let mut fake = Fake::server(UBUNTU, "", "0\n");
+        fake.on("sshd -t", 255, "");
+        let (r, evs) = go(&mut fake, opts(false, false, true), true, 22, &keys()).await;
+        r.unwrap();
+        let sshd: Vec<&str> = fake
+            .cmds()
+            .into_iter()
+            .filter(|c| c.contains("ssh"))
+            .collect();
+        assert_eq!(sshd, ["sshd -t"], "nothing touched: {sshd:?}");
+        assert!(evs.iter().any(|e| matches!(e, OnboardingEvent::Findings(f)
+            if f[0].message == "Your current SSH configuration has errors, so Keel left it unchanged.")));
+    }
+
+    #[tokio::test]
+    async fn overridden_password_setting_warns() {
+        let mut fake = Fake::server(UBUNTU, "", "0\n");
+        fake.on("sshd -T", 0, "port 22\npasswordauthentication yes\n");
+        let (r, evs) = go(&mut fake, opts(false, false, true), true, 22, &keys()).await;
+        r.unwrap();
+        assert!(evs.iter().any(|e| matches!(e, OnboardingEvent::Findings(f)
+            if f[0].severity == Severity::Warning
+                && f[0].message.contains("Another SSH configuration file"))));
+    }
+
+    #[tokio::test]
+    async fn confirmed_password_setting_does_not_warn() {
+        let mut fake = Fake::server(UBUNTU, "", "0\n");
+        let (r, evs) = go(&mut fake, opts(false, false, true), true, 22, &keys()).await;
+        r.unwrap();
+        assert!(
+            !evs.iter()
+                .any(|e| matches!(e, OnboardingEvent::Findings(_)))
+        );
+    }
+
+    #[tokio::test]
+    async fn bad_signature_names_the_step() {
+        let mut k = keys();
+        k.artifacts.x86_64.as_mut().unwrap().1[0] ^= 1;
+        let mut fake = Fake::server(UBUNTU, "", "0\n");
+        let (r, _) = go(&mut fake, opts(false, false, false), true, 22, &k).await;
+        assert!(r.unwrap_err().0.starts_with("Checking the agent: "));
     }
 
     #[tokio::test]

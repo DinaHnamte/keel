@@ -47,7 +47,7 @@ fn env() -> Option<Env> {
             port: get("KEEL_TEST_SSH_PORT")?.parse().unwrap(),
             user: get("KEEL_TEST_SSH_USER")?,
             auth: SshAuth::PrivateKey {
-                pem,
+                pem: pem.into(),
                 passphrase: None,
             },
         },
@@ -105,6 +105,18 @@ async fn ssh(e: &Env) -> SshSession {
 async fn sh(s: &mut SshSession, cmd: &str) -> (i32, String) {
     let (code, out, _) = s.exec(cmd, None).await.unwrap();
     (code, out)
+}
+
+/// Run `script` as root: through `sudo -n` unless the SSH user is root.
+async fn root(s: &mut SshSession, script: &str) -> (i32, String) {
+    let quoted = format!("'{}'", script.replace('\'', r"'\''"));
+    let is_root = sh(s, "id -u").await.1.trim() == "0";
+    let cmd = if is_root {
+        format!("sh -c {quoted}")
+    } else {
+        format!("sudo -n sh -c {quoted}")
+    };
+    sh(s, &cmd).await
 }
 
 #[tokio::test]
@@ -169,13 +181,26 @@ async fn onboard_blocked_makes_no_changes() {
     let Some(e) = env() else { return };
     let mut s = ssh(&e).await;
     // A clean server, with something else holding the agent's port.
-    sh(
+    root(
         &mut s,
-        "systemctl disable --now keel-agent; rm -f /usr/local/bin/keel-agent",
+        "systemctl disable --now keel-agent 2>/dev/null; \
+         rm -f /usr/local/bin/keel-agent /etc/systemd/system/keel-agent.service; \
+         systemctl daemon-reload; userdel keel 2>/dev/null; true",
     )
     .await;
-    sh(&mut s, "sh -c 'nohup nc -l 7443 >/dev/null 2>&1 &'").await;
+    // OpenBSD nc takes `-l 7443`; traditional nc needs `-l -p 7443`.
+    root(
+        &mut s,
+        "(nohup nc -l -p 7443 >/dev/null 2>&1 &); sleep 0.5; \
+         ss -Htln | grep -q ':7443 ' || (nohup nc -l 7443 >/dev/null 2>&1 &)",
+    )
+    .await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(
+        sh(&mut s, "ss -Htln | grep -q ':7443 '").await.0,
+        0,
+        "port 7443 should be held"
+    );
 
     let kc = MemoryKeychain::new();
     let id = DeviceIdentity::load_or_create(&kc).unwrap();
@@ -188,9 +213,15 @@ async fn onboard_blocked_makes_no_changes() {
             .any(|e| matches!(e, OnboardingEvent::Installing(_)))
     );
 
-    let (code, _) = sh(&mut s, "test -e /usr/local/bin/keel-agent").await;
-    sh(&mut s, "pkill -f 'nc -l 7443'").await;
-    assert_ne!(code, 0, "/usr/local/bin/keel-agent must not exist");
+    let bin = sh(&mut s, "test -e /usr/local/bin/keel-agent").await.0;
+    let unit = sh(&mut s, "test -e /etc/systemd/system/keel-agent.service")
+        .await
+        .0;
+    let user = sh(&mut s, "id keel").await.0;
+    root(&mut s, "pkill -f 'nc -l' ; true").await;
+    assert_ne!(bin, 0, "/usr/local/bin/keel-agent must not exist");
+    assert_ne!(unit, 0, "the unit file must not exist");
+    assert_ne!(user, 0, "the keel user must not exist");
 }
 
 #[tokio::test]
