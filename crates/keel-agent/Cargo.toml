@@ -1,0 +1,21 @@
+[package]
+name = "keel-agent"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "keel_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "keel-agent"
+path = "src/main.rs"
+
+[dependencies]
+keel-proto = { path = "../keel-proto" }
+serde.workspace = true
+anyhow = "1"
+thiserror = "2"
+toml = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
