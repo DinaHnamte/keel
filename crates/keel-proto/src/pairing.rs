@@ -66,6 +66,34 @@ impl PairingCode {
     }
 }
 
+/// The certificate could not be parsed, so it has no fingerprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FingerprintError;
+
+impl fmt::Display for FingerprintError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "The certificate is not valid DER-encoded X.509.")
+    }
+}
+
+impl std::error::Error for FingerprintError {}
+
+/// Lowercase hex SHA-256 of the certificate's DER-encoded SubjectPublicKeyInfo.
+///
+/// Identity in Keel is the public key, not the certificate: the same key
+/// re-issued in a new certificate keeps the same fingerprint.
+pub fn spki_fingerprint(cert_der: &[u8]) -> Result<String, FingerprintError> {
+    use sha2::{Digest, Sha256};
+    let (rest, cert) =
+        x509_parser::parse_x509_certificate(cert_der).map_err(|_| FingerprintError)?;
+    if !rest.is_empty() {
+        return Err(FingerprintError);
+    }
+    Ok(hex::encode(Sha256::digest(
+        cert.tbs_certificate.subject_pki.raw,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
