@@ -1,0 +1,1 @@
+The build pipeline places the signed agent binaries here (`keel-agent-x86_64`, `keel-agent-aarch64` and their 64-byte raw Ed25519 `.sig` files). They are bundled as app resources and are not committed.
