@@ -1,0 +1,2 @@
+# Dev agent-signing public key (debug builds only). Release builds embed KEEL_RELEASE_PUBKEY.
+735109a8451c4e5fbce9c25ac69334552d4c585e4cba391aa7650cd0e73b0511
