@@ -5,7 +5,8 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -38,6 +39,8 @@ pub fn system_clock() -> Clock {
     })
 }
 
+const MAX_FAILED_PAIRS: u32 = 3;
+
 /// Connection limits. The defaults are the production values.
 #[derive(Debug, Clone)]
 pub struct Limits {
@@ -46,10 +49,14 @@ pub struct Limits {
     pub rate_window: Duration,
     /// Concurrent connections across all peers.
     pub max_conns: usize,
+    /// Concurrent connections per source address (IPv6 by /64).
+    pub max_conns_per_ip: usize,
     /// TLS handshake plus first frame.
     pub handshake_timeout: Duration,
     /// Longest wait for the next request (and for a response to be written).
     pub idle_timeout: Duration,
+    /// Number of connections currently being served (observable by tests).
+    pub active: Arc<AtomicUsize>,
 }
 
 impl Default for Limits {
@@ -58,8 +65,67 @@ impl Default for Limits {
             rate_max: 30,
             rate_window: Duration::from_secs(60),
             max_conns: 64,
+            max_conns_per_ip: 8,
             handshake_timeout: Duration::from_secs(10),
             idle_timeout: Duration::from_secs(120),
+            active: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+/// Limiter key: IPv4 by full address, IPv6 by its /64 prefix (one customer
+/// usually holds a whole /64, so per-address limits would be trivial to dodge).
+fn ip_key(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => {
+            let mut o = v6.octets();
+            o[8..].fill(0);
+            IpAddr::V6(o.into())
+        }
+        v4 => v4,
+    }
+}
+
+/// Concurrent connections per limiter key; a slot is released on drop.
+#[derive(Clone, Default)]
+struct IpSlots(Arc<Mutex<HashMap<IpAddr, usize>>>);
+
+struct ActiveGuard(Arc<AtomicUsize>);
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct IpSlot {
+    slots: IpSlots,
+    key: IpAddr,
+}
+
+impl IpSlots {
+    fn acquire(&self, key: IpAddr, max: usize) -> Option<IpSlot> {
+        let mut m = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let n = m.entry(key).or_insert(0);
+        if *n >= max {
+            return None;
+        }
+        *n += 1;
+        Some(IpSlot {
+            slots: self.clone(),
+            key,
+        })
+    }
+}
+
+impl Drop for IpSlot {
+    fn drop(&mut self) {
+        let mut m = self.slots.0.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(n) = m.get_mut(&self.key) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&self.key);
+            }
         }
     }
 }
@@ -154,6 +220,8 @@ pub async fn serve_with_limits(
     );
 
     let permits = Arc::new(Semaphore::new(limits.max_conns));
+    let slots = IpSlots::default();
+    let max_per_ip = limits.max_conns_per_ip;
     let mut rate = RateLimiter::new(limits.rate_max, limits.rate_window);
     let shared = Arc::new(Shared {
         store,
@@ -180,7 +248,8 @@ pub async fn serve_with_limits(
             },
         };
         let ip = peer.ip().to_canonical();
-        if !rate.allow(ip, Instant::now()) {
+        let key = ip_key(ip);
+        if !rate.allow(key, Instant::now()) {
             tracing::warn!(%ip, "too many new connections from one address; dropped");
             continue; // dropping `tcp` closes it before any TLS
         }
@@ -188,10 +257,17 @@ pub async fn serve_with_limits(
             tracing::warn!(%ip, "connection limit reached; dropped");
             continue;
         };
+        let Some(ip_slot) = slots.acquire(key, max_per_ip) else {
+            tracing::warn!(%ip, "too many open connections from one address; dropped");
+            continue;
+        };
+        shared.limits.active.fetch_add(1, Ordering::SeqCst);
         let shared = shared.clone();
         let acceptor = acceptor.clone();
         tokio::spawn(async move {
             let _permit = permit;
+            let _ip_slot = ip_slot;
+            let _active = ActiveGuard(shared.limits.active.clone());
             if let Err(e) =
                 connection(tcp, SocketAddr::new(ip, peer.port()), acceptor, &shared).await
             {
@@ -282,6 +358,8 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
         }
     }
 
+    // Unpaired connections get no retries beyond this many failed Pair attempts.
+    let mut failed_pairs = 0u32;
     loop {
         let req = match timeout(idle, read_frame::<_, Request>(tls)).await {
             Err(_) => return Ok(()), // idle
@@ -295,9 +373,12 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
         };
         // Resolve on every request so a revoked key loses access immediately.
         let who = match sh.store.find_user_by_fingerprint(fingerprint) {
-            Ok(found) => found.map(|(user, projects)| Principal {
-                role: user.role,
-                projects,
+            Ok(found) => found.map(|(user, projects)| {
+                let principal = Principal {
+                    role: user.role,
+                    projects,
+                };
+                (user, principal)
             }),
             Err(e) => {
                 tracing::error!(error = %e, "user lookup failed");
@@ -305,6 +386,7 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                 continue;
             }
         };
+        let is_pair = matches!(req, Request::Pair { .. });
         let resp = handlers::handle(
             &sh.store,
             &sh.data_dir,
@@ -315,6 +397,23 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
             (sh.clock)(),
         );
         send(tls, &resp, idle).await?;
+        if who.is_none() {
+            // An unpaired device may only pair: close after a stray request, or
+            // after too many failed attempts (each one writes an audit row).
+            match &resp {
+                Response::Error {
+                    code: ErrorCode::NotPaired,
+                    ..
+                } => return Ok(()),
+                Response::Error { .. } if is_pair => {
+                    failed_pairs += 1;
+                    if failed_pairs >= MAX_FAILED_PAIRS {
+                        return Ok(());
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -337,5 +436,34 @@ mod tests {
         assert!(rl.allow(a, t1));
         // The sweep removed b, which had nothing left in the window.
         assert_eq!(rl.hits.len(), 1);
+    }
+
+    #[test]
+    fn ipv6_keyed_by_64_prefix_ipv4_by_address() {
+        let a: IpAddr = "2001:db8:1:2:aaaa::1".parse().unwrap();
+        let b: IpAddr = "2001:db8:1:2:bbbb::2".parse().unwrap();
+        let c: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(ip_key(a), ip_key(b));
+        assert_ne!(ip_key(a), ip_key(c));
+        let v4a: IpAddr = "10.0.0.1".parse().unwrap();
+        let v4b: IpAddr = "10.0.0.2".parse().unwrap();
+        assert_ne!(ip_key(v4a), ip_key(v4b));
+        let mapped: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        assert_eq!(ip_key(mapped), v4a);
+        let mut rl = RateLimiter::new(1, Duration::from_secs(60));
+        let t = Instant::now();
+        assert!(rl.allow(ip_key(a), t));
+        assert!(!rl.allow(ip_key(b), t), "same /64 shares one budget");
+    }
+
+    #[test]
+    fn ip_slots_release_on_drop() {
+        let slots = IpSlots::default();
+        let k: IpAddr = "10.0.0.1".parse().unwrap();
+        let a = slots.acquire(k, 2).unwrap();
+        let _b = slots.acquire(k, 2).unwrap();
+        assert!(slots.acquire(k, 2).is_none());
+        drop(a);
+        assert!(slots.acquire(k, 2).is_some());
     }
 }

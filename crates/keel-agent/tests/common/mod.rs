@@ -31,6 +31,7 @@ pub struct Agent {
     /// Owner pairing token issued by `init`.
     pub token: String,
     pub clock: Arc<AtomicI64>,
+    active: Arc<std::sync::atomic::AtomicUsize>,
     shutdown: Option<oneshot::Sender<()>>,
     handle: Option<JoinHandle<anyhow::Result<()>>>,
 }
@@ -41,6 +42,7 @@ impl Agent {
     }
 
     pub async fn start_with(limits: Limits) -> Agent {
+        let active = limits.active.clone();
         let dir = tempfile::tempdir().unwrap();
         let cfg = AgentConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
@@ -62,9 +64,15 @@ impl Agent {
             agent_fingerprint: out.fingerprint,
             token: out.pairing_code.token,
             clock,
+            active,
             shutdown: Some(tx),
             handle: Some(handle),
         }
+    }
+
+    /// Connections the server has accepted and is still serving.
+    pub fn open_connections(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
     }
 
     pub fn db_path(&self) -> PathBuf {

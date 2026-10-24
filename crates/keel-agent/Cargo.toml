@@ -30,7 +30,7 @@ base64.workspace = true
 libc = "0.2"
 tokio = { workspace = true, features = ["rt", "net", "time", "sync", "signal", "io-util", "macros"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "time", "sync"] }

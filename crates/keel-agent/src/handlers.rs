@@ -4,7 +4,7 @@
 use std::net::IpAddr;
 use std::path::Path;
 
-use keel_proto::{ErrorCode, Permission, Principal, Request, Response, authorize};
+use keel_proto::{ErrorCode, Permission, Principal, Request, Response, UserInfo, authorize};
 use sha2::{Digest, Sha256};
 
 use crate::store::{RedeemError, Store};
@@ -15,8 +15,9 @@ pub const MSG_BAD_TOKEN: &str = "That pairing code isn't valid.";
 pub const MSG_TOKEN_EXPIRED: &str = "That pairing code has expired. Create a new one.";
 pub const MSG_UNSUPPORTED_PROTOCOL: &str = "This app and the server agent are on incompatible versions. Update both to the latest version.";
 pub const MSG_MALFORMED: &str = "The request couldn't be understood.";
+pub const MSG_ALREADY_PAIRED: &str = "This device is already paired with this server.";
 pub const MSG_INTERNAL: &str = "Something went wrong on the server. Check the agent logs.";
-pub const MSG_TOO_LARGE: &str = "That request was too large.";
+pub const MSG_TOO_LARGE: &str = "That request was too large. Update the app and try again.";
 
 const MAX_NAME_CHARS: usize = 64;
 
@@ -52,14 +53,14 @@ fn internal(what: &str, e: &dyn std::fmt::Display) -> Response {
 
 /// Handle one request.
 ///
-/// `who` is the principal resolved from `fingerprint` for this very request
-/// (`None` if the key is not paired). `data_dir` is only used for disk usage in
+/// `who` is the user and principal resolved from `fingerprint` for this very
+/// request (`None` if the key is not paired). `data_dir` is only used for disk usage in
 /// `ServerStatus`. Audit rows are written for pairing attempts and denials,
 /// not for read-only requests.
 pub fn handle(
     store: &Store,
     data_dir: &Path,
-    who: Option<&Principal>,
+    who: Option<&(UserInfo, Principal)>,
     fingerprint: &str,
     req: Request,
     peer: IpAddr,
@@ -74,7 +75,7 @@ pub fn handle(
         } => return pair(store, fingerprint, token, display_name, peer, now),
         _ => {}
     }
-    let Some(who) = who else {
+    let Some((user, who)) = who else {
         return error(ErrorCode::NotPaired, MSG_NOT_PAIRED);
     };
     // WhoAmI, ServerStatus and ListApps (filtered per app below) need only the
@@ -84,21 +85,13 @@ pub fn handle(
         _ => Permission::ViewStatus,
     };
     if let Err(denied) = authorize(who, perm, None) {
-        let uid = store
-            .find_user_by_fingerprint(fingerprint)
-            .ok()
-            .flatten()
-            .map(|(u, _)| u.id);
+        let uid = Some(user.id);
         let name = request_name(&req);
         audit(store, uid, &format!("forbidden:{name}"), name, peer);
         return error(ErrorCode::Forbidden, &denied.to_string());
     }
     match req {
-        Request::WhoAmI => match store.find_user_by_fingerprint(fingerprint) {
-            Ok(Some((user, _))) => Response::Me(user),
-            Ok(None) => error(ErrorCode::NotPaired, MSG_NOT_PAIRED),
-            Err(e) => internal("whoami lookup failed", &e),
-        },
+        Request::WhoAmI => Response::Me(user.clone()),
         Request::ServerStatus => match read_status(data_dir) {
             Ok(s) => Response::Status(s),
             Err(e) => internal("reading server status failed", &e),
@@ -163,7 +156,7 @@ fn pair(
         Err(RedeemError::Unknown) => fail("unknown_token", ErrorCode::BadToken, MSG_BAD_TOKEN),
         Err(RedeemError::Used) => fail("used_token", ErrorCode::BadToken, MSG_BAD_TOKEN),
         Err(RedeemError::AlreadyPaired) => {
-            fail("already_paired", ErrorCode::BadToken, MSG_BAD_TOKEN)
+            fail("already_paired", ErrorCode::BadToken, MSG_ALREADY_PAIRED)
         }
         Err(RedeemError::Expired) => {
             fail("expired_token", ErrorCode::TokenExpired, MSG_TOKEN_EXPIRED)

@@ -50,14 +50,19 @@ fn run_init(host: &str, config: &Path, data_dir: Option<PathBuf>) -> anyhow::Res
     Ok(())
 }
 
+/// `RUST_LOG` as a plain level (error, warn, info, debug, trace); default info.
+fn log_level() -> tracing::Level {
+    std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(tracing::Level::INFO)
+}
+
 fn run_agent(config: &Path, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_max_level(log_level())
         .with_writer(std::io::stderr)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();

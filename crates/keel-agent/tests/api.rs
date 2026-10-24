@@ -8,8 +8,21 @@ use keel_agent::sysinfo::{
     parse_loadavg, parse_meminfo, parse_os_release, parse_uptime, parse_vmrss,
 };
 use keel_proto::{ErrorCode, MAX_FRAME, PROTOCOL_VERSION, Request, Response, Role};
+use sha2::Digest;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+
+/// Poll until `n` connections are being served, or fail after a deadline.
+async fn wait_for_accepts(agent: &Agent, n: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while agent.open_connections() < n {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "server did not accept {n} connections in time"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
 
 fn pair(token: &str, name: &str) -> Request {
     Request::Pair {
@@ -101,13 +114,14 @@ async fn hello_then_pair_then_whoami_is_owner() {
 #[tokio::test]
 async fn unpaired_client_gets_not_paired() {
     let agent = Agent::start().await;
-    let mut c = Client::connect_hello(agent.addr).await;
     for req in [
         Request::WhoAmI,
         Request::ServerStatus,
         Request::ListApps,
         Request::ListUsers,
     ] {
+        // Each stray request ends the connection, so use a fresh one.
+        let mut c = Client::connect_hello(agent.addr).await;
         let m = expect_error(c.request(&req).await, ErrorCode::NotPaired);
         assert_eq!(m, "This device isn't paired with the server yet.");
     }
@@ -324,14 +338,21 @@ async fn revoked_user_loses_access_on_open_connection() {
 
 #[tokio::test]
 async fn rate_limit_drops_31st_connection_in_a_minute() {
-    let agent = Agent::start().await;
+    // Production rate numbers; only the per-IP concurrency cap is lifted so
+    // 30 simultaneous connections from 127.0.0.1 can be held open.
+    let agent = Agent::start_with(Limits {
+        max_conns_per_ip: 100,
+        ..Limits::default()
+    })
+    .await;
     // 30 raw TCP connections are accepted (and then wait for a TLS hello).
     let mut held = Vec::new();
     for _ in 0..30 {
         held.push(TcpStream::connect(agent.addr).await.unwrap());
     }
-    // Give the server time to accept all of them.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Wait until the server has accepted all of them (it holds a TLS accept
+    // for each, so the agent's connection count is what we poll).
+    wait_for_accepts(&agent, 30).await;
     let mut over = TcpStream::connect(agent.addr).await.unwrap();
     use tokio::io::AsyncReadExt;
     let mut b = [0u8; 16];
@@ -356,7 +377,7 @@ async fn rate_limit_is_per_ip_and_window_rolls() {
     .await;
     let _a = TcpStream::connect(agent.addr).await.unwrap();
     let _b = TcpStream::connect(agent.addr).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_accepts(&agent, 2).await;
     let mut over = TcpStream::connect(agent.addr).await.unwrap();
     use tokio::io::AsyncReadExt;
     let mut buf = [0u8; 4];
@@ -375,12 +396,13 @@ async fn rate_limit_is_per_ip_and_window_rolls() {
 async fn connection_cap_drops_over_limit() {
     let agent = Agent::start_with(Limits {
         max_conns: 2,
+        max_conns_per_ip: 100,
         ..Limits::default()
     })
     .await;
     let _a = TcpStream::connect(agent.addr).await.unwrap();
     let _b = TcpStream::connect(agent.addr).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_accepts(&agent, 2).await;
     let mut over = TcpStream::connect(agent.addr).await.unwrap();
     use tokio::io::AsyncReadExt;
     let mut buf = [0u8; 4];
@@ -459,4 +481,98 @@ fn parse_vmrss_kb_to_bytes() {
     let s = "Name:\tkeel-agent\nVmPeak:\t  9000 kB\nVmRSS:\t   1234 kB\nThreads:\t1\n";
     assert_eq!(parse_vmrss(s), 1234 * 1024);
     assert_eq!(parse_vmrss("Name: x\n"), 0);
+}
+
+#[tokio::test]
+async fn unpaired_closed_after_three_failed_pairs() {
+    let agent = Agent::start().await;
+    let mut c = Client::connect_hello(agent.addr).await;
+    for _ in 0..3 {
+        expect_error(c.request(&pair("wrong", "X")).await, ErrorCode::BadToken);
+    }
+    assert!(c.closed_within(2).await);
+    let n: i64 = rusqlite::Connection::open(agent.db_path())
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'pair_failed'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 3, "no audit row for the close itself");
+    agent.stop().await;
+}
+
+#[tokio::test]
+async fn unpaired_closed_after_not_paired() {
+    let agent = Agent::start().await;
+    let mut c = Client::connect_hello(agent.addr).await;
+    expect_error(c.request(&Request::ListApps).await, ErrorCode::NotPaired);
+    assert!(c.closed_within(2).await);
+    agent.stop().await;
+}
+
+#[tokio::test]
+async fn per_ip_concurrent_cap() {
+    let agent = Agent::start().await;
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        held.push(TcpStream::connect(agent.addr).await.unwrap());
+    }
+    wait_for_accepts(&agent, 8).await;
+    let mut ninth = TcpStream::connect(agent.addr).await.unwrap();
+    use tokio::io::AsyncReadExt;
+    let mut b = [0u8; 4];
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), ninth.read(&mut b)).await,
+        Ok(Ok(0)) | Ok(Err(_))
+    ));
+    for h in &mut held {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), h.read(&mut b))
+                .await
+                .is_err(),
+            "the first eight stay open"
+        );
+    }
+    // Releasing one frees a slot.
+    held.pop();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut again = TcpStream::connect(agent.addr).await.unwrap();
+        if tokio::time::timeout(Duration::from_millis(300), again.read(&mut b))
+            .await
+            .is_err()
+        {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "slot never released");
+    }
+    agent.stop().await;
+}
+
+#[tokio::test]
+async fn already_paired_device_pairing_again_does_not_burn_token() {
+    let agent = Agent::start().await;
+    let mut a = Client::connect_hello(agent.addr).await;
+    assert!(matches!(
+        a.request(&pair(&agent.token, "First")).await,
+        Response::Paired { .. }
+    ));
+    // A second token, offered by the already-paired device.
+    let token2 = "second-token";
+    let hash: [u8; 32] = sha2::Sha256::digest(token2.as_bytes()).into();
+    agent
+        .store()
+        .create_pairing_token(&hash, Role::Admin, T0 + 1000)
+        .unwrap();
+    let m = expect_error(a.request(&pair(token2, "Again")).await, ErrorCode::BadToken);
+    assert_eq!(m, "This device is already paired with this server.");
+    // The token still works for a different device.
+    let mut b = Client::connect_hello(agent.addr).await;
+    match b.request(&pair(token2, "Second")).await {
+        Response::Paired { role, .. } => assert_eq!(role, Role::Admin),
+        other => panic!("{other:?}"),
+    }
+    agent.stop().await;
 }
