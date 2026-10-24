@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub const PAIRING_PREFIX: &str = "keel1:";
+/// Longest pairing code `parse` will look at.
+const MAX_PAIRING_CODE_LEN: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingCode {
@@ -50,8 +52,11 @@ impl PairingCode {
     }
 
     pub fn parse(s: &str) -> Result<PairingCode, PairingCodeError> {
+        let s = s.trim();
+        if s.len() > MAX_PAIRING_CODE_LEN {
+            return Err(PairingCodeError::BadPayload);
+        }
         let rest = s
-            .trim()
             .strip_prefix(PAIRING_PREFIX)
             .ok_or(PairingCodeError::WrongPrefix)?;
         let bytes = URL_SAFE_NO_PAD
@@ -93,6 +98,12 @@ mod tests {
     fn pairing_code_trims_whitespace() {
         let s = format!("  {}\r\n", sample().encode());
         assert_eq!(PairingCode::parse(&s).unwrap(), sample());
+    }
+
+    #[test]
+    fn pairing_code_rejects_oversize() {
+        let s = format!("keel1:{}", "A".repeat(5000));
+        assert_eq!(PairingCode::parse(&s), Err(PairingCodeError::BadPayload));
     }
 
     #[test]

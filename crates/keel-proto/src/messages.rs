@@ -21,7 +21,7 @@ pub enum Request {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", content = "data")]
 pub enum Response {
     HelloOk {
         protocol: u16,

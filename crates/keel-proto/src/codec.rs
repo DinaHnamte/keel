@@ -38,6 +38,7 @@ pub async fn write_frame<W: AsyncWrite + Unpin, T: Serialize>(
         ));
     }
     let mut out = Vec::with_capacity(4 + body.len());
+    // Safe: body.len() <= MAX_FRAME (1 MiB) was checked above, which fits in u32.
     out.extend_from_slice(&(body.len() as u32).to_be_bytes());
     out.extend_from_slice(&body);
     w.write_all(&out).await?;
@@ -107,6 +108,63 @@ mod tests {
             let got: Request = read_frame(&mut buf.as_slice()).await.unwrap();
             assert_eq!(got, req);
             assert_eq!(decode_frame_bytes(&buf).unwrap(), req);
+        }
+    }
+
+    #[tokio::test]
+    async fn every_response_variant_roundtrips() {
+        use crate::messages::*;
+        use crate::roles::{ProjectId, Role};
+        let user = UserInfo {
+            id: 2,
+            display_name: "Dinah".into(),
+            role: Role::Admin,
+            key_fingerprint: "ab:cd".into(),
+        };
+        let app = AppSummary {
+            id: 3,
+            name: "web".into(),
+            project_id: ProjectId(1),
+            state: AppState::Live,
+        };
+        let status = ServerStatus {
+            hostname: "h".into(),
+            os_pretty_name: "Ubuntu 24.04".into(),
+            arch: "x86_64".into(),
+            uptime_secs: 10,
+            load_1m: 0.5,
+            mem_total_bytes: 100,
+            mem_used_bytes: 50,
+            disk_total_bytes: 200,
+            disk_used_bytes: 100,
+            agent_rss_bytes: 10,
+        };
+        let all = vec![
+            Response::HelloOk {
+                protocol: 1,
+                agent_version: "0.1.0".into(),
+                server_id: "s".into(),
+            },
+            Response::Paired {
+                user_id: 1,
+                role: Role::Owner,
+            },
+            Response::Me(user.clone()),
+            Response::Status(status),
+            Response::Apps(vec![]),
+            Response::Apps(vec![app.clone(), app]),
+            Response::Users(vec![]),
+            Response::Users(vec![user.clone(), user]),
+            Response::Error {
+                code: ErrorCode::Forbidden,
+                message: "no".into(),
+            },
+        ];
+        for resp in all {
+            let mut buf = Vec::new();
+            write_frame(&mut buf, &resp).await.unwrap();
+            let got: Response = read_frame(&mut buf.as_slice()).await.unwrap();
+            assert_eq!(got, resp);
         }
     }
 
