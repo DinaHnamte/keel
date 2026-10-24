@@ -28,7 +28,14 @@ enum Cmd {
         data_dir: Option<PathBuf>,
     },
     /// Run the agent
-    Run,
+    Run {
+        /// Path to the agent config file
+        #[arg(long, default_value = "/etc/keel/agent.toml")]
+        config: PathBuf,
+        /// Data directory (overrides the config file)
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
 }
 
 fn run_init(host: &str, config: &Path, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
@@ -41,6 +48,36 @@ fn run_init(host: &str, config: &Path, data_dir: Option<PathBuf>) -> anyhow::Res
     println!("fingerprint={}", out.fingerprint);
     println!("pairing_code={}", out.pairing_code.encode());
     Ok(())
+}
+
+fn run_agent(config: &Path, data_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .init();
+    let mut cfg = AgentConfig::load(config)?;
+    if let Some(d) = data_dir {
+        cfg.data_dir = d;
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let mut term = signal(SignalKind::terminate())?;
+        let shutdown = async move {
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+        };
+        keel_agent::server::run(cfg, keel_agent::server::system_clock(), shutdown).await
+    })
 }
 
 fn main() -> ExitCode {
@@ -57,9 +94,12 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Cmd::Run => {
-            eprintln!("not implemented yet");
-            ExitCode::FAILURE
-        }
+        Cmd::Run { config, data_dir } => match run_agent(&config, data_dir) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("keel-agent failed: {e:#}");
+                ExitCode::FAILURE
+            }
+        },
     }
 }
