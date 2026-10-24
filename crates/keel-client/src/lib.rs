@@ -2,6 +2,7 @@
 
 pub mod connection;
 pub mod identity;
+pub mod onboarding;
 pub mod servers;
 
 pub use connection::{ConnectError, Connection, HelloInfo, pair};
