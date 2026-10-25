@@ -124,6 +124,9 @@ impl SshSession {
         let host_key = Arc::new(Mutex::new(None));
         let config = Arc::new(client::Config {
             keepalive_interval: Some(Duration::from_secs(15)),
+            // A busy small server (package installs) can be slow to answer;
+            // give it two minutes before treating the session as lost.
+            keepalive_max: 8,
             ..Default::default()
         });
         let handler = Client {

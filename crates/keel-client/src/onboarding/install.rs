@@ -557,19 +557,36 @@ async fn security_updates<R: Remote>(
         .await?;
     } else if is_rhel_family(facts) {
         emit(events, OnboardingEvent::Installing(STEP)).await;
-        run.root(
-            STEP,
-            "Couldn't install dnf-automatic. Check the server can reach its package mirrors and try again.",
-            &format!(
-                "sh -c {}",
-                shell_quote("dnf install -y dnf-automatic && systemctl enable --now dnf-automatic.timer")
-            ),
-            None,
-        )
-        .await?;
+        // dnf can take many minutes on small instances (it loads large repo
+        // metadata), long enough for the SSH session to drop. Run it as a
+        // transient systemd unit on the server so the session returns at once.
+        let (code, _, _) = run
+            .try_root(
+                STEP,
+                &format!(
+                    "systemd-run --collect sh -c {}",
+                    shell_quote(
+                        "dnf install -y dnf-automatic && systemctl enable --now dnf-automatic.timer"
+                    )
+                ),
+                None,
+            )
+            .await?;
+        if code != 0 {
+            emit(
+                events,
+                OnboardingEvent::Findings(vec![Finding {
+                    severity: Severity::Warning,
+                    message: SECURITY_UPDATES_SKIPPED.into(),
+                }]),
+            )
+            .await;
+        }
     }
     Ok(())
 }
+
+pub(crate) const SECURITY_UPDATES_SKIPPED: &str = "Keel couldn't turn on automatic security updates. You can turn them on later with: sudo dnf install -y dnf-automatic && sudo systemctl enable --now dnf-automatic.timer";
 
 async fn disable_ssh_passwords<R: Remote>(
     run: &mut Runner<'_, R>,
@@ -1006,7 +1023,7 @@ mod tests {
         assert!(cmds.contains(&"firewall-cmd --permanent --add-port=7443/tcp"));
         assert!(cmds.contains(&"firewall-cmd --reload"));
         assert!(cmds.contains(
-            &"sh -c 'dnf install -y dnf-automatic && systemctl enable --now dnf-automatic.timer'"
+            &"systemd-run --collect sh -c 'dnf install -y dnf-automatic && systemctl enable --now dnf-automatic.timer'"
         ));
 
         let mut fake = Fake::server(ROCKY, "", "0\n");
@@ -1039,8 +1056,21 @@ mod tests {
         let cmds = fake.cmds();
         assert!(cmds.contains(&"firewall-cmd --permanent --add-port=7443/tcp"));
         assert!(cmds.contains(
-            &"sh -c 'dnf install -y dnf-automatic && systemctl enable --now dnf-automatic.timer'"
+            &"systemd-run --collect sh -c 'dnf install -y dnf-automatic && systemctl enable --now dnf-automatic.timer'"
         ));
+    }
+
+    #[tokio::test]
+    async fn rhel_security_updates_failure_is_only_a_warning() {
+        let mut fake = Fake::server(ROCKY, "", "0\n");
+        fake.on("command -v ufw", 1, "")
+            .on("command -v firewall-cmd", 1, "")
+            .on("systemd-run", 1, "");
+        let (r, evs) = go(&mut fake, opts(false, true, false), true, 22, &keys()).await;
+        r.unwrap();
+        assert!(evs.iter().any(|e| matches!(e, OnboardingEvent::Findings(f)
+            if f[0].severity == Severity::Warning
+                && f[0].message == SECURITY_UPDATES_SKIPPED)));
     }
 
     #[tokio::test]
