@@ -38,6 +38,17 @@ impl Store {
         Ok(())
     }
 
+    /// Expire every unused token of `role` as of `now`. Used tokens are left
+    /// as they are, so they keep reporting "used".
+    pub fn expire_unused_pairing_tokens(&self, role: Role, now: i64) -> Result<()> {
+        self.lock().execute(
+            "UPDATE pairing_tokens SET expires_at = MIN(expires_at, ?1) \
+             WHERE role = ?2 AND used_at IS NULL",
+            rusqlite::params![now, role_to_str(role)],
+        )?;
+        Ok(())
+    }
+
     pub fn redeem_pairing_token(
         &self,
         token_hash: &[u8; 32],

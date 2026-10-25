@@ -161,3 +161,29 @@ fn binary_error_goes_to_stderr_exit_1() {
     assert!(out.stdout.is_empty());
     assert!(!out.stderr.is_empty());
 }
+
+#[test]
+fn second_init_expires_previous_unused_owner_token() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = cfg(tmp.path());
+    // A used token from an earlier run stays used, not "expired".
+    let used = init(&cfg, "h", NOW).unwrap();
+    let store = Store::open(&cfg.data_dir.join("keel.db")).unwrap();
+    store
+        .redeem_pairing_token(&hash(&used.pairing_code.token), "fp0", "A", NOW + 1)
+        .unwrap();
+    // Leave this one unused, then issue another.
+    let a = init(&cfg, "h", NOW + 2).unwrap();
+    let b = init(&cfg, "h", NOW + 3).unwrap();
+    let e = store
+        .redeem_pairing_token(&hash(&a.pairing_code.token), "fp1", "B", NOW + 4)
+        .unwrap_err();
+    assert!(matches!(e, RedeemError::Expired), "{e:?}");
+    let e = store
+        .redeem_pairing_token(&hash(&used.pairing_code.token), "fp2", "C", NOW + 4)
+        .unwrap_err();
+    assert!(matches!(e, RedeemError::Used), "{e:?}");
+    store
+        .redeem_pairing_token(&hash(&b.pairing_code.token), "fp1", "B", NOW + 4)
+        .unwrap();
+}

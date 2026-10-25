@@ -41,8 +41,8 @@ fn ensure_dir(path: &Path) -> Result<()> {
 /// Creates `cfg.data_dir` (mode 0700) if missing, opens or creates
 /// `<data_dir>/keel.db`, loads or creates the TLS identity in
 /// `<data_dir>/tls/` (so the fingerprint never changes on re-run), and adds a
-/// new Owner pairing token that expires `now + 86_400`. Earlier tokens are not
-/// touched, so used ones stay used.
+/// new Owner pairing token that expires `now + 86_400`. Earlier unused Owner
+/// tokens are expired so only the newest code works; used ones stay used.
 ///
 /// The token is 32 bytes from the OS random source, encoded base64url without
 /// padding. Only `SHA-256(encoded token string as UTF-8 bytes)` is stored.
@@ -64,6 +64,9 @@ pub fn init(cfg: &AgentConfig, host: &str, now: i64) -> Result<InitOutput> {
     OsRng.fill_bytes(&mut raw);
     let token = URL_SAFE_NO_PAD.encode(raw);
     let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    store
+        .expire_unused_pairing_tokens(Role::Owner, now)
+        .context("could not retire the previous pairing code")?;
     store
         .create_pairing_token(&hash, Role::Owner, now + TOKEN_TTL_SECS)
         .context("could not save the pairing token")?;
