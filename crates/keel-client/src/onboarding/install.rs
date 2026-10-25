@@ -412,7 +412,7 @@ pub async fn install<R: Remote + Send>(
     // The agent should be listening by now; give it a little longer if not.
     if !run.remote.reachable(AGENT_PORT, AGENT_START_WAIT).await {
         return Err(StepFailed(format!(
-            "{START}: This device can't reach the agent on port {AGENT_PORT}. If your hosting provider has a firewall, allow TCP port {AGENT_PORT} there, then try again."
+            "{START}: The agent started but Keel can't reach port {AGENT_PORT}. Allow it in your server's firewall and your hosting provider's firewall, then try again."
         )));
     }
 
@@ -1168,7 +1168,10 @@ mod tests {
         fake.reachable = false;
         let (r, _) = go(&mut fake, opts(false, false, false), true, 22, &keys()).await;
         let msg = r.unwrap_err().0;
-        assert!(msg.contains("allow TCP port 7443"), "{msg}");
+        assert_eq!(
+            msg,
+            "Starting the agent: The agent started but Keel can't reach port 7443. Allow it in your server's firewall and your hosting provider's firewall, then try again."
+        );
     }
 
     #[tokio::test]
