@@ -3,6 +3,7 @@
 //! KEEL_TEST_SSH_HOST, KEEL_TEST_SSH_PORT, KEEL_TEST_SSH_USER,
 //! KEEL_TEST_SSH_KEY_FILE, KEEL_TEST_AGENT_BIN, KEEL_TEST_AGENT_SIG.
 //! The agent binary must be signed with the key this build embeds.
+//! Run with `--test-threads=1`: every test drives the same server.
 
 use keel_client::onboarding::{
     AgentArtifacts, InstallOptions, OnboardingEvent, Remote, SshAuth, SshSession, SshTarget,
@@ -242,4 +243,53 @@ async fn onboard_ssh_2222_firewall_keeps_access() {
     let (code, out) = root(&mut s, "ufw status || firewall-cmd --list-ports").await;
     assert_eq!(code, 0);
     assert!(out.contains(&e.target.port.to_string()), "{out}");
+}
+
+/// Reboot-recovery stand-in: after `systemctl restart keel-agent` the client
+/// reconnects and gets `ServerStatus` within 15 seconds.
+#[tokio::test]
+#[ignore]
+async fn agent_restart_client_reconnects() {
+    use std::time::{Duration, Instant};
+    let Some(e) = env() else { return };
+    let kc = MemoryKeychain::new();
+    let id = DeviceIdentity::load_or_create(&kc).unwrap();
+    let rec = onboard(&e, opts(), &id, &kc).await.0.unwrap();
+    let (mut conn, _) = Connection::open(&rec, &id).await.unwrap();
+    assert!(matches!(
+        conn.request(Request::ServerStatus).await.unwrap(),
+        Response::Status(_)
+    ));
+
+    let mut s = ssh(&e).await;
+    let (code, _) = root(&mut s, "systemctl restart keel-agent").await;
+    assert_eq!(code, 0, "systemctl restart keel-agent failed");
+    let restarted = Instant::now();
+
+    // The old connection is gone with the old process.
+    assert!(conn.request(Request::ServerStatus).await.is_err());
+
+    let deadline = restarted + Duration::from_secs(15);
+    loop {
+        let attempt = async {
+            let (mut c, _) = Connection::open(&rec, &id).await.ok()?;
+            match c.request(Request::ServerStatus).await.ok()? {
+                Response::Status(st) => Some(st),
+                _ => None,
+            }
+        };
+        if let Ok(Some(st)) = tokio::time::timeout(Duration::from_secs(3), attempt).await {
+            eprintln!(
+                "reconnected after {:?} (uptime {}s)",
+                restarted.elapsed(),
+                st.uptime_secs
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no ServerStatus within 15 s of restarting the agent"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
