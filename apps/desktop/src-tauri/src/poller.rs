@@ -21,6 +21,8 @@ const FAILURES_UNTIL_UNREACHABLE: u32 = 2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reachability {
+    /// No poll result yet.
+    Connecting,
     Online,
     Unreachable,
     /// The server's identity no longer matches the pinned fingerprint.
@@ -42,10 +44,10 @@ pub enum PollOutcome {
 }
 
 impl PollState {
-    /// A server that has not answered yet.
+    /// A server that has not been polled yet.
     pub fn new() -> PollState {
         PollState {
-            reachability: Reachability::Unreachable,
+            reachability: Reachability::Connecting,
             failures: 0,
             last_seen: None,
         }
@@ -290,14 +292,18 @@ impl Poller {
 }
 
 async fn request(conn: &mut Connection, req: Request) -> Result<Response, String> {
-    match timeout(REQUEST_TIMEOUT, conn.request(req)).await {
-        Ok(Ok(resp)) => Ok(resp),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err("request timed out".to_string()),
+    conn.request(req).await.map_err(|e| e.to_string())
+}
+
+/// Status and apps under one shared deadline.
+async fn poll_once(conn: &mut Connection) -> Result<(ServerStatus, Vec<AppSummary>), String> {
+    match timeout(REQUEST_TIMEOUT, poll_inner(conn)).await {
+        Ok(result) => result,
+        Err(_) => Err("poll timed out".to_string()),
     }
 }
 
-async fn poll_once(conn: &mut Connection) -> Result<(ServerStatus, Vec<AppSummary>), String> {
+async fn poll_inner(conn: &mut Connection) -> Result<(ServerStatus, Vec<AppSummary>), String> {
     let status = match request(conn, Request::ServerStatus).await? {
         Response::Status(s) => s,
         other => return Err(format!("unexpected reply to status: {other:?}")),
@@ -347,12 +353,22 @@ mod tests {
     }
 
     #[test]
-    fn new_server_is_unreachable_until_first_success() {
+    fn new_server_is_connecting_until_first_result() {
         let s = PollState::new();
-        assert_eq!(s.reachability, Reachability::Unreachable);
+        assert_eq!(s.reachability, Reachability::Connecting);
         assert_eq!(s.last_seen, None);
         let s = next(s, PollOutcome::Failure, 5);
+        assert_eq!(s.reachability, Reachability::Connecting);
+        let s = next(s, PollOutcome::Failure, 10);
         assert_eq!(s.reachability, Reachability::Unreachable);
+    }
+
+    #[test]
+    fn connecting_becomes_online_on_success_and_untrusted_on_mismatch() {
+        let s = next(PollState::new(), PollOutcome::Success, 5);
+        assert_eq!(s.reachability, Reachability::Online);
+        let s = next(PollState::new(), PollOutcome::Mismatch, 5);
+        assert_eq!(s.reachability, Reachability::Untrusted);
     }
 
     #[test]

@@ -58,6 +58,7 @@ pub fn run() {
             commands::start_onboarding,
             commands::pair_with_code,
             commands::remove_server,
+            commands::list_users,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Keel");

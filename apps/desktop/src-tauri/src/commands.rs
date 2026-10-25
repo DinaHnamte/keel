@@ -6,8 +6,10 @@ use keel_client::onboarding::{
     AgentArtifacts, InstallOptions, OnboardingEvent, SshAuth, SshTarget, generate_ssh_keypair,
     run_onboarding,
 };
-use keel_client::{DeviceIdentity, Keychain, OsKeychain, ServerStore, pair};
-use keel_proto::PairingCode;
+use std::time::Duration;
+
+use keel_client::{Connection, DeviceIdentity, Keychain, OsKeychain, ServerStore, pair};
+use keel_proto::{ErrorCode, PairingCode, Request, Response, UserInfo};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zeroize::Zeroizing;
@@ -24,7 +26,7 @@ pub struct AppState {
     pub pending_key: Mutex<Option<Zeroizing<String>>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OnboardAuth {
     GeneratedKey,
@@ -37,7 +39,7 @@ pub enum OnboardAuth {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct OnboardRequest {
     pub name: String,
     pub host: String,
@@ -45,6 +47,28 @@ pub struct OnboardRequest {
     pub user: String,
     pub auth: OnboardAuth,
     pub options: InstallOptions,
+}
+
+impl std::fmt::Debug for OnboardAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OnboardAuth::GeneratedKey => f.write_str("GeneratedKey"),
+            OnboardAuth::PrivateKey { .. } => f.write_str("PrivateKey { .. }"),
+            OnboardAuth::Password { .. } => f.write_str("Password { .. }"),
+        }
+    }
+}
+
+impl std::fmt::Debug for OnboardRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OnboardRequest")
+            .field("name", &self.name)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("auth", &self.auth)
+            .finish_non_exhaustive()
+    }
 }
 
 const STORE_ERROR: &str =
@@ -115,6 +139,8 @@ pub async fn start_onboarding(
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<OnboardingEvent>(64);
     let forward_app = app.clone();
+    let succeeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let succeeded_fwd = Arc::clone(&succeeded);
     let forwarder = tauri::async_runtime::spawn(async move {
         while let Some(ev) = rx.recv().await {
             let ev = match ev {
@@ -123,6 +149,7 @@ pub async fn start_onboarding(
                     let saved = state.store.lock().unwrap().upsert(rec.clone());
                     match saved {
                         Ok(()) => {
+                            succeeded_fwd.store(true, std::sync::atomic::Ordering::SeqCst);
                             state.poller.start(rec.clone());
                             OnboardingEvent::Done(rec)
                         }
@@ -150,8 +177,11 @@ pub async fn start_onboarding(
         )
         .await;
         let _ = forwarder.await;
-        // Success or failure, the generated key is no longer needed in memory.
-        *app.state::<AppState>().pending_key.lock().unwrap() = None;
+        // Keep the key after a failure so the user can retry without
+        // re-authorizing it; drop it once onboarding succeeded.
+        if succeeded.load(std::sync::atomic::Ordering::SeqCst) {
+            *app.state::<AppState>().pending_key.lock().unwrap() = None;
+        }
     });
     Ok(())
 }
@@ -193,13 +223,53 @@ pub async fn pair_with_code(
 
 #[tauri::command]
 pub async fn remove_server(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    OsKeychain.delete(&format!("ssh:{id}")).map_err(|e| {
-        tracing::warn!(error = %e, "keychain delete failed");
-        "Couldn't remove this server's saved sign-in from your keychain. Unlock the keychain and try again.".to_string()
-    })?;
-    state.poller.stop(&id);
     state.store.lock().unwrap().remove(&id).map_err(|e| {
         tracing::warn!(error = %e, "removing server failed");
         STORE_ERROR.to_string()
-    })
+    })?;
+    state.poller.stop(&id);
+    if let Err(e) = OsKeychain.delete(&format!("ssh:{id}")) {
+        tracing::warn!(error = %e, "keychain delete failed");
+    }
+    Ok(())
+}
+
+/// Users of one server, for the server page. A refusal (the role may not
+/// manage users) is reported as `None`, not as an error.
+#[tauri::command]
+pub async fn list_users(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<Vec<UserInfo>>, String> {
+    let record = state
+        .store
+        .lock()
+        .unwrap()
+        .list()
+        .iter()
+        .find(|r| r.id == id)
+        .cloned()
+        .ok_or_else(|| "This server isn't in your list any more.".to_string())?;
+    let unreachable = || "Couldn't reach this server to load its users.".to_string();
+    let (mut conn, _) = Connection::open(&record, &state.identity)
+        .await
+        .map_err(|e| {
+            tracing::debug!(error = %e, "list users: connect failed");
+            unreachable()
+        })?;
+    let resp = tokio::time::timeout(Duration::from_secs(5), conn.request(Request::ListUsers))
+        .await
+        .map_err(|_| unreachable())?
+        .map_err(|e| {
+            tracing::debug!(error = %e, "list users failed");
+            unreachable()
+        })?;
+    match resp {
+        Response::Users(users) => Ok(Some(users)),
+        Response::Error {
+            code: ErrorCode::Forbidden,
+            ..
+        } => Ok(None),
+        _ => Err(unreachable()),
+    }
 }
