@@ -185,7 +185,8 @@ async fn onboard_blocked_makes_no_changes() {
         &mut s,
         "systemctl disable --now keel-agent 2>/dev/null; \
          rm -f /usr/local/bin/keel-agent /etc/systemd/system/keel-agent.service; \
-         systemctl daemon-reload; userdel keel 2>/dev/null; true",
+         systemctl daemon-reload; userdel keel 2>/dev/null; \
+         rm -rf /var/lib/keel /etc/keel; true",
     )
     .await;
     // OpenBSD nc takes `-l 7443`; traditional nc needs `-l -p 7443`.
@@ -237,7 +238,8 @@ async fn onboard_ssh_2222_firewall_keeps_access() {
     onboard(&e, opts(), &id, &kc).await.0.unwrap();
     // The firewall is on and SSH still works on the same port.
     let mut s = ssh(&e).await;
-    let (code, out) = sh(&mut s, "ufw status || firewall-cmd --list-ports").await;
+    // Both tools need root to report their rules.
+    let (code, out) = root(&mut s, "ufw status || firewall-cmd --list-ports").await;
     assert_eq!(code, 0);
     assert!(out.contains(&e.target.port.to_string()), "{out}");
 }
