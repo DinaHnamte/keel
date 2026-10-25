@@ -340,6 +340,10 @@ pub async fn install<R: Remote + Send>(
         None,
     )
     .await?;
+    // A recreated keel user can have a new uid; files left from the old one
+    // would stop `init` from writing its TLS identity.
+    run.root(SETUP, dirs, "chown -R keel:keel /var/lib/keel", None)
+        .await?;
     run.root(SETUP, dirs, "install -d -m 0755 /etc/keel", None)
         .await?;
     run.write_file(
@@ -887,6 +891,7 @@ mod tests {
             "mv -f /usr/local/bin/keel-agent.new /usr/local/bin/keel-agent",
             "id keel",
             "install -d -m 0700 -o keel -g keel /var/lib/keel",
+            "chown -R keel:keel /var/lib/keel",
             "install -d -m 0755 /etc/keel",
             "sh -c 'cat > /etc/systemd/system/keel-agent.service'",
             "systemctl daemon-reload",
