@@ -80,8 +80,15 @@ describe('serverBadge', () => {
     expect(serverBadge(server('connecting'))).toEqual({ state: 'connecting', label: 'Connecting' });
     expect(serverBadge(server('unreachable'))).toEqual({ state: 'unreachable', label: 'Unreachable' });
     expect(serverBadge(server('untrusted'))).toEqual({
-      state: 'unreachable',
+      state: 'untrusted',
       label: 'Identity changed'
     });
+  });
+
+  it('gives identity changed its own icon, distinct from unreachable', async () => {
+    const { STATE_ICON } = await import('./status');
+    const IconShieldX = (await import('@tabler/icons-svelte/icons/shield-x')).default;
+    expect(STATE_ICON.untrusted).toBe(IconShieldX);
+    expect(STATE_ICON.untrusted).not.toBe(STATE_ICON.unreachable);
   });
 });

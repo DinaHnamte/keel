@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { STATE_ICON, STATE_LABEL, type RowState } from '../status';
+  import { STATE_ICON, STATE_LABEL, type BadgeState } from '../status';
 
-  let { state, label }: { state: RowState; label?: string } = $props();
+  let { state, label }: { state: BadgeState; label?: string } = $props();
   const Icon = $derived(STATE_ICON[state]);
 </script>
 
@@ -21,7 +21,8 @@
     font-weight: 500;
   }
   .down .label,
-  .unreachable .label {
+  .unreachable .label,
+  .untrusted .label {
     font-weight: 600;
   }
   .live {
@@ -32,7 +33,8 @@
     --c: var(--warn);
   }
   .down,
-  .unreachable {
+  .unreachable,
+  .untrusted {
     --c: var(--down);
   }
   .connecting {

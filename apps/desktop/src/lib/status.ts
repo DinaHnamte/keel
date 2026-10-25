@@ -4,6 +4,7 @@ import IconCircleX from '@tabler/icons-svelte/icons/circle-x';
 import IconHammer from '@tabler/icons-svelte/icons/hammer';
 import IconCloudOff from '@tabler/icons-svelte/icons/cloud-off';
 import IconLoader from '@tabler/icons-svelte/icons/loader-2';
+import IconShieldX from '@tabler/icons-svelte/icons/shield-x';
 import type { AppView, ServerView } from './types';
 
 export type RowState = 'down' | 'unreachable' | 'building' | 'degraded' | 'connecting' | 'live';
@@ -11,7 +12,11 @@ export type RowState = 'down' | 'unreachable' | 'building' | 'degraded' | 'conne
 /** Problems first; a server we have not heard from yet sits between degraded and live. */
 const ORDER: RowState[] = ['down', 'unreachable', 'building', 'degraded', 'connecting', 'live'];
 
-export const STATE_LABEL: Record<RowState, string> = {
+/** Badge states: every row state, plus a server whose identity changed. */
+export type BadgeState = RowState | 'untrusted';
+
+export const STATE_LABEL: Record<BadgeState, string> = {
+  untrusted: 'Identity changed',
   down: 'Down',
   unreachable: 'Server unreachable',
   building: 'Building',
@@ -21,7 +26,8 @@ export const STATE_LABEL: Record<RowState, string> = {
 };
 
 // The Tabler Svelte icons are typed as legacy class components.
-export const STATE_ICON: Record<RowState, typeof IconCircleCheck> = {
+export const STATE_ICON: Record<BadgeState, typeof IconCircleCheck> = {
+  untrusted: IconShieldX,
   down: IconCircleX,
   unreachable: IconCloudOff,
   building: IconHammer,
@@ -63,14 +69,14 @@ export function summaryLine(rows: Row[], serverCount: number): string {
 }
 
 /** How a server itself is shown: same icons and colors as app states, server wording. */
-export function serverBadge(server: ServerView): { state: RowState; label: string } {
+export function serverBadge(server: ServerView): { state: BadgeState; label: string } {
   switch (server.reachability) {
     case 'online':
       return { state: 'live', label: 'Online' };
     case 'connecting':
       return { state: 'connecting', label: 'Connecting' };
     case 'untrusted':
-      return { state: 'unreachable', label: 'Identity changed' };
+      return { state: 'untrusted', label: 'Identity changed' };
     default:
       return { state: 'unreachable', label: 'Unreachable' };
   }
