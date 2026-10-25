@@ -195,12 +195,12 @@ fn save_ssh_credentials(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection::pair;
     use crate::identity::MemoryKeychain;
     use keel_agent::config::AgentConfig;
     use keel_agent::init::init;
     use keel_agent::server::{serve, system_clock};
     use keel_agent::store::Store;
-    use crate::connection::pair;
     use keel_proto::Role;
 
     fn sha256(b: &[u8]) -> [u8; 32] {

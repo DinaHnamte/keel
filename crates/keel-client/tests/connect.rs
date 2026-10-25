@@ -301,14 +301,24 @@ async fn pairing_code_again_after_removal_confirms_owner() {
     let agent = start_agent().await;
     let id = identity();
     let port = agent.addr.port();
-    let first = pair("127.0.0.1", port, &agent.fingerprint, &agent.token, "me", &id)
-        .await
-        .unwrap();
+    let first = pair(
+        "127.0.0.1",
+        port,
+        &agent.fingerprint,
+        &agent.token,
+        "me",
+        &id,
+    )
+    .await
+    .unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    let fresh = init(&agent.cfg, "127.0.0.1", now).unwrap().pairing_code.token;
+    let fresh = init(&agent.cfg, "127.0.0.1", now)
+        .unwrap()
+        .pairing_code
+        .token;
     // Plain pairing refuses, and says what to do.
     let err = pair("127.0.0.1", port, &agent.fingerprint, &fresh, "me", &id)
         .await
@@ -328,9 +338,16 @@ async fn pair_or_confirm_pairs_an_unpaired_device() {
     let agent = start_agent().await;
     let id = identity();
     let port = agent.addr.port();
-    let rec = pair_or_confirm("127.0.0.1", port, &agent.fingerprint, &agent.token, "me", &id)
-        .await
-        .unwrap();
+    let rec = pair_or_confirm(
+        "127.0.0.1",
+        port,
+        &agent.fingerprint,
+        &agent.token,
+        "me",
+        &id,
+    )
+    .await
+    .unwrap();
     let (_, hello) = Connection::open(&rec, &id).await.unwrap();
     assert_eq!(hello.server_id, rec.id);
 }
