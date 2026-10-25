@@ -263,7 +263,7 @@ Signed installers: Windows (.msi), macOS (.dmg, notarized), Linux (AppImage, .de
 ### Agent
 
 - Static binaries for x86-64 and ARM64.
-- Supported: Ubuntu 22.04 and 24.04, Debian 12 and 13 (fully tested). AlmaLinux and Rocky 9 best-effort at launch.
+- Supported: Ubuntu 22.04 and 24.04, Debian 12 and 13 (fully tested). AlmaLinux, Rocky Linux and Oracle Linux 9 best-effort at launch.
 - Releases are signed (Ed25519); the agent rejects unsigned updates.
 - Update flow: download → verify signature → start new binary → self-check → hand over. On failure, the previous binary is restored.
 - Apps and Caddy run independently of the agent; an agent restart or crash never takes sites offline.

@@ -146,11 +146,11 @@ pub fn support(f: &HostFacts) -> Support {
     match f.os_id.as_str() {
         "ubuntu" if v == "22.04" || v == "24.04" => Support::Full,
         "debian" if v == "12" || v == "13" => Support::Full,
-        id @ ("almalinux" | "rocky") if v.starts_with('9') => {
-            let family = if id == "almalinux" {
-                "AlmaLinux"
-            } else {
-                "Rocky Linux"
+        id @ ("almalinux" | "rocky" | "ol") if v.split('.').next() == Some("9") => {
+            let family = match id {
+                "almalinux" => "AlmaLinux",
+                "rocky" => "Rocky Linux",
+                _ => "Oracle Linux",
             };
             Support::BestEffort(format!(
                 "{family} {v} is supported on a best-effort basis. Some features may need manual fixes."
@@ -292,6 +292,29 @@ mod tests {
         let fs = preflight(&f, 7443);
         assert!(msgs(&fs, Severity::Blocker).is_empty());
         assert_eq!(msgs(&fs, Severity::Warning).len(), 1);
+    }
+
+    const ORACLE_9: &str = "NAME=\"Oracle Linux Server\"\nVERSION=\"9.8\"\nID=\"ol\"\nID_LIKE=\"fedora\"\nVERSION_ID=\"9.8\"\nPRETTY_NAME=\"Oracle Linux Server 9.8\"\n";
+
+    #[test]
+    fn oracle_linux_9_best_effort_message() {
+        let f = facts(ORACLE_9, "aarch64", "");
+        let fs = preflight(&f, 7443);
+        assert!(msgs(&fs, Severity::Blocker).is_empty());
+        assert_eq!(
+            msgs(&fs, Severity::Warning),
+            [
+                "Oracle Linux 9.8 is supported on a best-effort basis. Some features may need manual fixes."
+            ]
+        );
+    }
+
+    #[test]
+    fn rhel_family_needs_major_version_9_exactly() {
+        let f = facts("ID=\"rocky\"\nVERSION_ID=\"90\"\n", "x86_64", "");
+        assert!(matches!(support(&f), Support::Unsupported(_)));
+        let f = facts("ID=\"ol\"\nVERSION_ID=\"8.10\"\n", "x86_64", "");
+        assert!(matches!(support(&f), Support::Unsupported(_)));
     }
 
     #[test]

@@ -109,7 +109,7 @@ fn is_debian_family(f: &HostFacts) -> bool {
 }
 
 fn is_rhel_family(f: &HostFacts) -> bool {
-    matches!(f.os_id.as_str(), "almalinux" | "rocky")
+    matches!(f.os_id.as_str(), "almalinux" | "rocky" | "ol")
 }
 
 async fn emit(events: &Sender<OnboardingEvent>, ev: OnboardingEvent) {
@@ -1022,6 +1022,25 @@ mod tests {
         );
         assert!(evs.iter().any(|e| matches!(e, OnboardingEvent::Findings(f)
             if f[0].severity == Severity::Warning && f[0].message.contains("No firewall"))));
+    }
+
+    #[tokio::test]
+    async fn oracle_linux_uses_firewalld_and_dnf_automatic() {
+        const ORACLE: &str =
+            "ID=\"ol\"\nVERSION_ID=\"9.8\"\nPRETTY_NAME=\"Oracle Linux Server 9.8\"\n";
+        let mut fake = Fake::server(ORACLE, "", "0\n");
+        fake.on("command -v ufw", 1, "").on(
+            "command -v firewall-cmd",
+            0,
+            "/usr/bin/firewall-cmd\n",
+        );
+        let (r, _) = go(&mut fake, opts(true, true, false), true, 22, &keys()).await;
+        r.unwrap();
+        let cmds = fake.cmds();
+        assert!(cmds.contains(&"firewall-cmd --permanent --add-port=7443/tcp"));
+        assert!(cmds.contains(
+            &"sh -c 'dnf install -y dnf-automatic && systemctl enable --now dnf-automatic.timer'"
+        ));
     }
 
     #[tokio::test]
