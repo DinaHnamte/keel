@@ -135,10 +135,8 @@ async fn onboard(
     .map_err(|e| format!("{PAIR}: {e}"))?;
     rec.name = server_name.to_string();
 
-    if opts.keep_ssh_credentials {
-        save_ssh_credentials(kc, &rec.id, target, &host_key).map_err(|e| format!("{PAIR}: {e}"))?;
-        rec.ssh_saved = true;
-    }
+    rec.ssh_saved = store_ssh_choice(kc, &rec.id, opts.keep_ssh_credentials, target, &host_key)
+        .map_err(|e| format!("{PAIR}: {e}"))?;
     Ok(rec)
 }
 
@@ -149,6 +147,27 @@ fn effective_options(opts: InstallOptions) -> InstallOptions {
         keep_ssh_credentials: opts.keep_ssh_credentials || opts.disable_ssh_passwords,
         ..opts
     }
+}
+
+/// Save the SSH sign-in when the person chose to keep it; otherwise remove
+/// any sign-in saved by an earlier onboarding of the same server. Returns
+/// whether a sign-in is now saved.
+fn store_ssh_choice(
+    kc: &dyn Keychain,
+    server_id: &str,
+    keep: bool,
+    target: &SshTarget,
+    host_key: &str,
+) -> Result<bool, String> {
+    if keep {
+        save_ssh_credentials(kc, server_id, target, host_key)?;
+        return Ok(true);
+    }
+    kc.delete(&format!("ssh:{server_id}")).map_err(|e| {
+        tracing::debug!(error = %e, "keychain delete failed");
+        "The server is ready, but an SSH sign-in saved earlier couldn't be removed from this device's keychain. Unlock the keychain and remove the server, then add it again.".to_string()
+    })?;
+    Ok(false)
 }
 
 fn save_ssh_credentials(
@@ -207,6 +226,24 @@ mod tests {
         assert!(!effective_options(opts(false, false)).keep_ssh_credentials);
         assert!(effective_options(opts(false, true)).keep_ssh_credentials);
         assert!(effective_options(opts(true, false)).disable_ssh_passwords);
+    }
+
+    #[test]
+    fn reonboarding_without_keeping_removes_saved_credentials() {
+        let kc = MemoryKeychain::new();
+        let target = SshTarget {
+            host: "203.0.113.5".into(),
+            port: 22,
+            user: "root".into(),
+            auth: SshAuth::Password(zeroize::Zeroizing::new("pw".into())),
+        };
+        assert!(store_ssh_choice(&kc, "srv1", true, &target, "SHA256:abc").unwrap());
+        assert!(kc.get("ssh:srv1").unwrap().is_some());
+        // Added again with "keep SSH credentials" off.
+        assert!(!store_ssh_choice(&kc, "srv1", false, &target, "SHA256:abc").unwrap());
+        assert!(kc.get("ssh:srv1").unwrap().is_none());
+        // Nothing saved before: still fine.
+        assert!(!store_ssh_choice(&kc, "srv2", false, &target, "SHA256:abc").unwrap());
     }
 
     #[test]
