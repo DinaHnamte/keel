@@ -567,7 +567,10 @@ async fn already_paired_device_pairing_again_does_not_burn_token() {
         .create_pairing_token(&hash, Role::Admin, T0 + 1000)
         .unwrap();
     let m = expect_error(a.request(&pair(token2, "Again")).await, ErrorCode::BadToken);
-    assert_eq!(m, "This device is already paired with this server.");
+    assert_eq!(
+        m,
+        "This device is already paired with this server. Remove it from the app and add it again, or keep using it."
+    );
     // The token still works for a different device.
     let mut b = Client::connect_hello(agent.addr).await;
     match b.request(&pair(token2, "Second")).await {

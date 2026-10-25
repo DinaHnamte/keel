@@ -342,3 +342,51 @@ pub async fn pair(
         )),
     }
 }
+
+/// Add a server with a pairing token, whether or not this device is already
+/// paired with it. Asks the agent who this device is first:
+/// - an Owner is confirmed and the record returned (the token is not spent),
+///   which covers re-running onboarding and re-adding a removed server;
+/// - any other role is a plain failure;
+/// - an unpaired device pairs with the token.
+pub async fn pair_or_confirm(
+    host: &str,
+    port: u16,
+    fingerprint: &str,
+    token: &str,
+    display_name: &str,
+    id: &DeviceIdentity,
+) -> Result<ServerRecord, ConnectError> {
+    let probe = ServerRecord {
+        id: String::new(),
+        name: host.to_string(),
+        host: host.to_string(),
+        port,
+        fingerprint: fingerprint.to_string(),
+        ssh_saved: false,
+    };
+    let (mut conn, hello) = Connection::open(&probe, id).await?;
+    match conn.request(Request::WhoAmI).await {
+        Ok(Response::Me(u)) if u.role != keel_proto::Role::Owner => {
+            return Err(ConnectError::Rejected(
+                "This device is paired but isn't an owner of this server.".to_string(),
+            ));
+        }
+        Ok(Response::Me(_)) => {
+            return Ok(ServerRecord {
+                id: hello.server_id,
+                ..probe
+            });
+        }
+        Err(ConnectError::NotPaired) => {}
+        Ok(_) => {
+            return Err(ConnectError::Io(
+                "The server sent an unexpected reply. Update the app or the server agent."
+                    .to_string(),
+            ));
+        }
+        Err(e) => return Err(e),
+    }
+    drop(conn);
+    pair(host, port, fingerprint, token, display_name, id).await
+}

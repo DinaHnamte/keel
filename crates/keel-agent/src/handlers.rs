@@ -15,7 +15,7 @@ pub const MSG_BAD_TOKEN: &str = "That pairing code isn't valid.";
 pub const MSG_TOKEN_EXPIRED: &str = "That pairing code has expired. Create a new one.";
 pub const MSG_UNSUPPORTED_PROTOCOL: &str = "This app and the server agent are on incompatible versions. Update both to the latest version.";
 pub const MSG_MALFORMED: &str = "The request couldn't be understood.";
-pub const MSG_ALREADY_PAIRED: &str = "This device is already paired with this server.";
+pub const MSG_ALREADY_PAIRED: &str = "This device is already paired with this server. Remove it from the app and add it again, or keep using it.";
 pub const MSG_INTERNAL: &str = "Something went wrong on the server. Check the agent logs.";
 pub const MSG_TOO_LARGE: &str = "That request was too large. Update the app and try again.";
 

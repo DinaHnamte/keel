@@ -6,11 +6,10 @@ pub mod preflight;
 pub mod ssh;
 
 use anyhow::anyhow;
-use keel_proto::Request;
 use serde::Serialize;
 use tokio::sync::mpsc::Sender;
 
-use crate::connection::{ConnectError, Connection, pair};
+use crate::connection::pair_or_confirm;
 use crate::identity::{DeviceIdentity, Keychain};
 use crate::servers::ServerRecord;
 
@@ -174,50 +173,6 @@ fn save_ssh_credentials(
     })
 }
 
-/// Pair with the fresh token. A device that is already paired (onboarding run
-/// again) is confirmed instead by asking the agent who it is.
-async fn pair_or_confirm(
-    host: &str,
-    port: u16,
-    fingerprint: &str,
-    token: &str,
-    device_name: &str,
-    id: &DeviceIdentity,
-) -> Result<ServerRecord, ConnectError> {
-    let probe = ServerRecord {
-        id: String::new(),
-        name: host.to_string(),
-        host: host.to_string(),
-        port,
-        fingerprint: fingerprint.to_string(),
-        ssh_saved: false,
-    };
-    let (mut conn, hello) = Connection::open(&probe, id).await?;
-    match conn.request(Request::WhoAmI).await {
-        Ok(keel_proto::Response::Me(u)) if u.role != keel_proto::Role::Owner => {
-            return Err(ConnectError::Rejected(
-                "This device is paired but isn't an owner of this server.".to_string(),
-            ));
-        }
-        Ok(keel_proto::Response::Me(_)) => {
-            return Ok(ServerRecord {
-                id: hello.server_id,
-                ..probe
-            });
-        }
-        Err(ConnectError::NotPaired) => {}
-        Ok(_) => {
-            return Err(ConnectError::Io(
-                "The server sent an unexpected reply. Update the app or the server agent."
-                    .to_string(),
-            ));
-        }
-        Err(e) => return Err(e),
-    }
-    drop(conn);
-    pair(host, port, fingerprint, token, device_name, id).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +181,7 @@ mod tests {
     use keel_agent::init::init;
     use keel_agent::server::{serve, system_clock};
     use keel_agent::store::Store;
+    use crate::connection::pair;
     use keel_proto::Role;
 
     fn sha256(b: &[u8]) -> [u8; 32] {

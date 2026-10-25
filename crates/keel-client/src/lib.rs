@@ -5,7 +5,7 @@ pub mod identity;
 pub mod onboarding;
 pub mod servers;
 
-pub use connection::{ConnectError, Connection, HelloInfo, pair};
+pub use connection::{ConnectError, Connection, HelloInfo, pair, pair_or_confirm};
 #[cfg(feature = "os-keychain")]
 pub use identity::OsKeychain;
 pub use identity::{DeviceIdentity, Keychain, MemoryKeychain};

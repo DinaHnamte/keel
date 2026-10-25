@@ -8,6 +8,7 @@ use keel_agent::init::init;
 use keel_agent::server::{serve, system_clock};
 use keel_client::{
     ConnectError, Connection, DeviceIdentity, MemoryKeychain, ServerRecord, ServerStore, pair,
+    pair_or_confirm,
 };
 use keel_proto::{Request, Response};
 use tokio::net::TcpListener;
@@ -17,6 +18,7 @@ struct TestAgent {
     addr: SocketAddr,
     fingerprint: String,
     token: String,
+    cfg: AgentConfig,
     _dir: tempfile::TempDir,
     _shutdown: oneshot::Sender<()>,
 }
@@ -35,13 +37,14 @@ async fn start_agent() -> TestAgent {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = oneshot::channel::<()>();
-    tokio::spawn(serve(listener, cfg, system_clock(), async {
+    tokio::spawn(serve(listener, cfg.clone(), system_clock(), async {
         let _ = rx.await;
     }));
     TestAgent {
         addr,
         fingerprint: out.fingerprint,
         token: out.pairing_code.token,
+        cfg,
         _dir: dir,
         _shutdown: tx,
     }
@@ -288,4 +291,46 @@ async fn dropped_request_poisons_connection() {
     let r = conn.request(Request::ServerStatus).await;
     assert!(matches!(r, Err(ConnectError::Io(_))), "got {r:?}");
     assert!(started.elapsed() < std::time::Duration::from_millis(100));
+}
+
+/// A server removed from the app and added again with a new code: the device
+/// is still an Owner on the agent, so the code path confirms instead of
+/// failing with "already paired".
+#[tokio::test]
+async fn pairing_code_again_after_removal_confirms_owner() {
+    let agent = start_agent().await;
+    let id = identity();
+    let port = agent.addr.port();
+    let first = pair("127.0.0.1", port, &agent.fingerprint, &agent.token, "me", &id)
+        .await
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let fresh = init(&agent.cfg, "127.0.0.1", now).unwrap().pairing_code.token;
+    // Plain pairing refuses, and says what to do.
+    let err = pair("127.0.0.1", port, &agent.fingerprint, &fresh, "me", &id)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "This device is already paired with this server. Remove it from the app and add it again, or keep using it."
+    );
+    let again = pair_or_confirm("127.0.0.1", port, &agent.fingerprint, &fresh, "me", &id)
+        .await
+        .unwrap();
+    assert_eq!(again, first);
+}
+
+#[tokio::test]
+async fn pair_or_confirm_pairs_an_unpaired_device() {
+    let agent = start_agent().await;
+    let id = identity();
+    let port = agent.addr.port();
+    let rec = pair_or_confirm("127.0.0.1", port, &agent.fingerprint, &agent.token, "me", &id)
+        .await
+        .unwrap();
+    let (_, hello) = Connection::open(&rec, &id).await.unwrap();
+    assert_eq!(hello.server_id, rec.id);
 }

@@ -8,7 +8,7 @@ use keel_client::onboarding::{
 };
 use std::time::Duration;
 
-use keel_client::{Connection, DeviceIdentity, Keychain, OsKeychain, ServerStore, pair};
+use keel_client::{Connection, DeviceIdentity, Keychain, OsKeychain, ServerStore, pair_or_confirm};
 use keel_proto::{ErrorCode, PairingCode, Request, Response, UserInfo};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -193,7 +193,7 @@ pub async fn pair_with_code(
     state: State<'_, AppState>,
 ) -> Result<ServerView, String> {
     let code = PairingCode::parse(&code).map_err(|e| e.to_string())?;
-    let mut rec = pair(
+    let mut rec = pair_or_confirm(
         &code.host,
         code.port,
         &code.fingerprint,
