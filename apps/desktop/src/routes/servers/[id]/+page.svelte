@@ -1,6 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
+  import { untrack } from 'svelte';
   import IconArrowLeft from '@tabler/icons-svelte/icons/arrow-left';
   import { invoke } from '@tauri-apps/api/core';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -11,6 +12,7 @@
   import type { UserInfo } from '$lib/types';
 
   const server = $derived(fleet.servers.find((s) => s.id === page.params.id) ?? null);
+  const roleLabel = (r: string) => r.charAt(0).toUpperCase() + r.slice(1);
   const status = $derived(server?.status ?? null);
 
   let users = $state<UserInfo[] | null>(null);
@@ -19,13 +21,18 @@
   let removing = $state(false);
   let removeError = $state('');
 
+  // Keyed on primitives only: poll ticks replace `server` every few seconds, and
+  // must not reload the users or open a new connection each time.
+  const serverId = $derived(page.params.id);
+  const online = $derived(server?.reachability === 'online');
+
   $effect(() => {
-    const id = page.params.id;
-    if (!id || server?.reachability !== 'online') {
-      return;
-    }
+    const id = serverId;
+    if (!id || !online) return;
     let stale = false;
-    usersState = 'loading';
+    untrack(() => {
+      if (usersState !== 'ready') usersState = 'loading';
+    });
     invoke<UserInfo[] | null>('list_users', { id })
       .then((list) => {
         if (stale) return;
@@ -149,7 +156,7 @@
         {#each users as u (u.id)}
           <li>
             <span class="name">{u.display_name}</span>
-            <span class="muted">{u.role}</span>
+            <span class="muted">{roleLabel(u.role)}</span>
             <span class="mono muted">{u.key_fingerprint}</span>
           </li>
         {/each}

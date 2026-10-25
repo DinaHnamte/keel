@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { registerOverlay } from '../ui.svelte';
   import IconX from '@tabler/icons-svelte/icons/x';
   import { rowState } from '../status';
   import type { AppView, ServerView } from '../types';
@@ -10,9 +12,11 @@
     onclose
   }: { app: AppView; server: ServerView; onclose: () => void } = $props();
   const state = $derived(rowState(app, server));
+  const overlay = registerOverlay();
+  onMount(() => overlay.release);
 </script>
 
-<svelte:window onkeydown={(e) => e.key === 'Escape' && onclose()} />
+<svelte:window onkeydown={(e) => e.key === 'Escape' && overlay.isTop() && onclose()} />
 
 <aside class="drawer" aria-label="App details">
   <header>

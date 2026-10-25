@@ -273,3 +273,38 @@ pub async fn list_users(
         _ => Err(unreachable()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_output_never_contains_secrets() {
+        let password = OnboardAuth::Password {
+            password: "hunter2-secret".into(),
+        };
+        let key = OnboardAuth::PrivateKey {
+            pem: "-----BEGIN PRIVATE KEY-----abc".into(),
+            passphrase: Some("pass-secret".into()),
+        };
+        let req = OnboardRequest {
+            name: "edge".into(),
+            host: "h".into(),
+            port: 22,
+            user: "root".into(),
+            auth: OnboardAuth::Password {
+                password: "hunter2-secret".into(),
+            },
+            options: InstallOptions::default(),
+        };
+        for text in [
+            format!("{password:?}"),
+            format!("{key:?}"),
+            format!("{req:?}"),
+        ] {
+            for secret in ["hunter2-secret", "pass-secret", "BEGIN PRIVATE KEY", "abc"] {
+                assert!(!text.contains(secret), "{text} leaked {secret}");
+            }
+        }
+    }
+}

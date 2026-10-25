@@ -38,6 +38,9 @@
         <button class="btn primary" onclick={() => (ui.addServerOpen = true)}>Add server</button>
       </section>
     {:else}
+      {#if fleet.appsNotice}
+        <p class="notice" role="status">{fleet.appsNotice}</p>
+      {/if}
       <h1 class="summary num">{summaryLine(rows, fleet.servers.length)}</h1>
 
       {#if rows.length === 0}
@@ -103,6 +106,14 @@
     font-weight: 500;
     color: var(--ink-2);
     margin-bottom: 10px;
+  }
+  .notice {
+    margin: 0 0 10px;
+    padding: 8px 12px;
+    border: 1px solid var(--warn);
+    border-left-width: 3px;
+    border-radius: var(--radius);
+    background: var(--panel);
   }
   .section {
     font-size: 14px;

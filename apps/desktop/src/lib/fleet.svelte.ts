@@ -7,14 +7,24 @@ export const fleet = $state({
   servers: [] as ServerView[],
   apps: [] as AppView[],
   loaded: false,
-  error: ''
+  /** The server list could not be loaded at all: replaces the board. */
+  error: '',
+  /** Apps could not be refreshed: shown inline above the list, last known apps stay. */
+  appsNotice: ''
 });
 
-async function refreshApps() {
+export const APPS_NOTICE = "Couldn't load your apps. Keel will keep trying.";
+
+/** Returns true on success. Clears the notice on success, sets it on failure. */
+export async function refreshApps(): Promise<boolean> {
   try {
     fleet.apps = await invoke<AppView[]>('list_apps');
+    fleet.appsNotice = '';
+    return true;
   } catch (e) {
-    fleet.error = String(e);
+    console.error(e);
+    fleet.appsNotice = APPS_NOTICE;
+    return false;
   }
 }
 
@@ -25,16 +35,17 @@ export function startFleet(): () => void {
   (async () => {
     try {
       fleet.servers = await invoke<ServerView[]>('list_servers');
-      await refreshApps();
       fleet.error = '';
     } catch (e) {
       fleet.error = "Couldn't load your servers. Restart Keel and try again.";
       console.error(e);
     }
+    await refreshApps();
     fleet.loaded = true;
   })();
   listen<ServerView[]>('servers://changed', (e) => {
     fleet.servers = e.payload;
+    fleet.error = '';
     void refreshApps();
   }).then((fn) => {
     if (disposed) fn();

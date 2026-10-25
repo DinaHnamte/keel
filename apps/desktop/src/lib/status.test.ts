@@ -72,3 +72,16 @@ describe('status', () => {
     expect(summaryLine([], 1)).toBe('0 apps on 1 server');
   });
 });
+
+describe('serverBadge', () => {
+  it('labels every reachability in words', async () => {
+    const { serverBadge } = await import('./status');
+    expect(serverBadge(server('online'))).toEqual({ state: 'live', label: 'Online' });
+    expect(serverBadge(server('connecting'))).toEqual({ state: 'connecting', label: 'Connecting' });
+    expect(serverBadge(server('unreachable'))).toEqual({ state: 'unreachable', label: 'Unreachable' });
+    expect(serverBadge(server('untrusted'))).toEqual({
+      state: 'unreachable',
+      label: 'Identity changed'
+    });
+  });
+});
