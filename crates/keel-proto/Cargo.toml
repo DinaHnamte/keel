@@ -1,0 +1,16 @@
+[package]
+name = "keel-proto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+sha2 = "0.10"
+hex = "0.4"
+x509-parser = "0.17"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "rt"] }

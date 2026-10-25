@@ -1,0 +1,130 @@
+:root {
+  color-scheme: light dark;
+  --canvas: #eef1f4;
+  --panel: #ffffff;
+  --ink: #18212b;
+  --ink-2: #5a6675;
+  --rule: #d6dce2;
+  --live: #1e9e6a;
+  --warn: #d4930f;
+  --down: #d2412f;
+
+  --down-tint: color-mix(in srgb, var(--down) 8%, var(--panel));
+  --hover: color-mix(in srgb, var(--ink) 5%, var(--panel));
+  --selected: color-mix(in srgb, var(--ink) 9%, var(--panel));
+  --ink-on-fill: var(--panel);
+
+  --font-ui: 'Instrument Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  --row-h: 32px;
+  --radius: 4px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #12171d;
+    --panel: #1a2129;
+    --ink: #e6ebf0;
+    --ink-2: #93a0ae;
+    --rule: #2a333d;
+    --live: #3dbe88;
+    --warn: #e8ae3a;
+    --down: #ef6b5a;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.muted {
+  color: var(--ink-2);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--panel);
+  cursor: pointer;
+  text-decoration: none;
+  font-weight: 500;
+}
+.btn:hover {
+  background: var(--hover);
+}
+.btn.primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--ink-on-fill);
+}
+.btn.primary:hover {
+  background: color-mix(in srgb, var(--ink) 88%, var(--panel));
+}
+.btn.danger {
+  border-color: var(--down);
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

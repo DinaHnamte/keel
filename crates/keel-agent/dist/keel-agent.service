@@ -1,0 +1,20 @@
+[Unit]
+Description=Keel agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=keel
+ExecStart=/usr/local/bin/keel-agent run
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/keel
+PrivateTmp=yes
+ProtectHome=yes
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

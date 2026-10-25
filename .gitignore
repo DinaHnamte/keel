@@ -1,0 +1,6 @@
+target/
+node_modules/
+.svelte-kit/
+.superpowers/
+# Signed agent binaries copied in by CI for bundling.
+apps/desktop/src-tauri/agent/keel-agent-*
