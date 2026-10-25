@@ -48,7 +48,7 @@ jobs:
         run: shellcheck scripts/install.sh ci/onboarding.sh
       - name: install.sh unit file matches crates/keel-agent/dist/keel-agent.service
         run: |
-          sed -n "/<<'UNIT'\$/,/^UNIT\$/p" scripts/install.sh | sed '1d;$d' > "$RUNNER_TEMP/unit"
+          sed -n "/<<'UNIT'/,/^UNIT\$/p" scripts/install.sh | sed '1d;$d' > "$RUNNER_TEMP/unit"
           diff -u crates/keel-agent/dist/keel-agent.service "$RUNNER_TEMP/unit"
       - name: npm ci
         working-directory: apps/desktop
@@ -81,7 +81,7 @@ jobs:
       - name: Install nightly Rust and cargo-fuzz
         run: |
           rustup toolchain install nightly --profile minimal
-          cargo +nightly install cargo-fuzz --locked
+          cargo +nightly install cargo-fuzz --version 0.13.2 --locked
       - name: Fuzz the frame decoder for 60 seconds
         working-directory: crates/keel-proto
         run: cargo +nightly fuzz run decode -- -max_total_time=60
@@ -101,13 +101,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust (from rust-toolchain.toml, includes both musl targets)
         run: rustup toolchain install
+      # Tag builds start from a clean target dir: nothing restored from branch
+      # runs is in the build that the release key later signs.
       - uses: Swatinem/rust-cache@v2
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
           key: agent-${{ matrix.arch }}
       - name: Install cargo-zigbuild
         run: |
-          pip install ziglang
-          cargo install cargo-zigbuild --locked
+          pip install ziglang==0.15.2
+          cargo install cargo-zigbuild --version 0.23.4 --locked
       - name: Build a static musl agent
         run: cargo zigbuild -p keel-agent --release --target ${{ matrix.arch }}-unknown-linux-musl
       - name: Collect
@@ -115,10 +118,14 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.arch }}-unknown-linux-musl/release/keel-agent dist/keel-agent-${{ matrix.arch }}
           file dist/keel-agent-${{ matrix.arch }}
+      # Build the signer with no secret in scope, so no build script or proc
+      # macro of any dependency ever runs where the release key is readable.
+      - name: Build the signing tool
+        run: cargo build -p keel-client --example sign_agent
       - name: Sign with the dev key
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         run: |
-          cargo run -p keel-client --example sign_agent -- \
+          target/debug/examples/sign_agent \
             crates/keel-client/dev-release.key \
             dist/keel-agent-${{ matrix.arch }} dist/keel-agent-${{ matrix.arch }}.sig
       - name: Sign with the release key
@@ -132,10 +139,12 @@ jobs:
             exit 1
           fi
           key="$RUNNER_TEMP/release.key"
+          trap 'rm -f "$key"' EXIT
           ( umask 077; printf '%s\n' "$KEEL_RELEASE_SIGNING_KEY" > "$key" )
-          out="$(cargo run -q -p keel-client --example sign_agent -- \
+          unset KEEL_RELEASE_SIGNING_KEY
+          # The prebuilt signer only; no cargo here.
+          out="$(target/debug/examples/sign_agent \
             "$key" dist/keel-agent-${{ matrix.arch }} dist/keel-agent-${{ matrix.arch }}.sig)"
-          rm -f "$key"
           # The signing key must belong to the public key the desktop embeds.
           case "$out" in
             *"public key $KEEL_RELEASE_PUBKEY)"*) ;;

@@ -279,10 +279,11 @@ async fn agent_restart_client_reconnects() {
             }
         };
         if let Ok(Some(st)) = tokio::time::timeout(Duration::from_secs(3), attempt).await {
-            eprintln!(
-                "reconnected after {:?} (uptime {}s)",
-                restarted.elapsed(),
-                st.uptime_secs
+            let took = restarted.elapsed();
+            eprintln!("reconnected after {took:?} (uptime {}s)", st.uptime_secs);
+            assert!(
+                took <= Duration::from_secs(15),
+                "ServerStatus came back only after {took:?}, over the 15 s budget"
             );
             break;
         }

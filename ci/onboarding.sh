@@ -86,7 +86,17 @@ docker exec "$name" sh -c 'systemctl disable --now keel-agent; userdel keel;
     systemctl daemon-reload' >/dev/null 2>&1
 
 install_sh() {
-    docker exec -e "KEEL_DOWNLOAD_BASE=http://$gateway:8765/$1" "$name" sh /tmp/install.sh
+    docker exec -e "KEEL_DOWNLOAD_BASE=http://$gateway:8765/$1" "$name" sh /tmp/install.sh 2>&1
+}
+# Run install.sh expecting success; on failure show everything it printed
+# (on stderr, because callers capture stdout).
+install_ok() {
+    if ! out="$(install_sh "$1")"; then
+        printf '%s\n' "$out" >&2
+        echo "FAIL: install.sh exited non-zero on $image" >&2
+        exit 1
+    fi
+    printf '%s\n' "$out"
 }
 field() { sed -n "s/^$1//p"; }
 code_of() { sed -n '/^Paste this pairing code into the Keel app:$/{n;p;}'; }
@@ -97,7 +107,7 @@ until curl -fs "http://127.0.0.1:8765/good/keel-agent-x86_64.sha256" >/dev/null;
     sleep 0.5
 done
 
-first="$(install_sh good)"
+first="$(install_ok good)"
 printf '%s\n' "$first"
 code1="$(printf '%s\n' "$first" | code_of)"
 fp1="$(printf '%s\n' "$first" | field 'Server fingerprint: ')"
@@ -107,7 +117,8 @@ docker exec "$name" systemctl is-active --quiet keel-agent || { echo "FAIL: agen
 docker exec "$name" sh -c 'test "$(stat -c %a:%U /var/lib/keel)" = 700:keel' || { echo "FAIL: /var/lib/keel mode" >&2; exit 1; }
 docker exec "$name" cat /etc/systemd/system/keel-agent.service | diff - "$here/../crates/keel-agent/dist/keel-agent.service"
 
-second="$(install_sh good)"
+second="$(install_ok good)"
+printf '%s\n' "$second"
 code2="$(printf '%s\n' "$second" | code_of)"
 fp2="$(printf '%s\n' "$second" | field 'Server fingerprint: ')"
 if [ -z "$code2" ] || [ "$code2" = "$code1" ]; then

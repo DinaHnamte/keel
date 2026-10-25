@@ -48,7 +48,16 @@ if [ -z "$host" ]; then
 fi
 
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT INT TERM
+# Never leave a half-copied binary behind. INT/TERM exit through EXIT so
+# Ctrl-C both stops the script and cleans up.
+trap 'rm -rf "$tmp"; rm -f "$AGENT_BIN_NEW"' EXIT
+trap 'exit 130' INT TERM
+
+# For failures once the agent program is in place: the server is partly set
+# up, and every step is safe to repeat.
+incomplete() {
+    fail "$* The install isn't complete. Fix the problem above, then run this script again; that's safe."
+}
 
 download() {
     # $1 URL, $2 output file
@@ -85,18 +94,26 @@ fi
 echo "Installing the agent..."
 # Write beside the target, then rename over it, so a running agent never
 # sees a partial file.
-cp "$tmp/$name" "$AGENT_BIN_NEW"
-chmod 755 "$AGENT_BIN_NEW"
-mv -f "$AGENT_BIN_NEW" "$AGENT_BIN"
+{ cp "$tmp/$name" "$AGENT_BIN_NEW" && chmod 755 "$AGENT_BIN_NEW"; } \
+    || fail "Couldn't save the agent program to /usr/local/bin. Check there's free disk space and try again. Nothing was installed."
+mv -f "$AGENT_BIN_NEW" "$AGENT_BIN" \
+    || fail "Couldn't put the agent program in place at $AGENT_BIN. Try again. Nothing was installed."
 
 if ! id keel >/dev/null 2>&1; then
-    useradd --system --no-create-home --home-dir /var/lib/keel --shell /usr/sbin/nologin keel
+    useradd --system --no-create-home --home-dir /var/lib/keel --shell /usr/sbin/nologin keel \
+        || incomplete "Couldn't create the keel system user."
 fi
-install -d -m 0700 -o keel -g keel /var/lib/keel
-install -d -m 0755 /etc/keel
+install -d -m 0700 -o keel -g keel /var/lib/keel \
+    || incomplete "Couldn't create the agent's data folder /var/lib/keel."
+# A recreated keel user can have a new uid; files left from the old one would
+# stop init from writing the agent's identity.
+chown -R keel:keel /var/lib/keel \
+    || incomplete "Couldn't give the keel user its data folder /var/lib/keel."
+install -d -m 0755 /etc/keel \
+    || incomplete "Couldn't create the agent's config folder /etc/keel."
 
 # Must stay identical to crates/keel-agent/dist/keel-agent.service (CI checks).
-cat >"$UNIT_PATH" <<'UNIT'
+cat >"$UNIT_PATH" <<'UNIT' || incomplete "Couldn't write the agent's system service to $UNIT_PATH."
 [Unit]
 Description=Keel agent
 After=network-online.target
@@ -118,26 +135,49 @@ MemoryMax=64M
 [Install]
 WantedBy=multi-user.target
 UNIT
-systemctl daemon-reload
+systemctl daemon-reload || incomplete "systemd couldn't load the agent's service."
 
 # Keeps the existing identity and issues a fresh one-time pairing token.
 init_out="$(runuser -u keel -- "$AGENT_BIN" init --host "$host")" \
-    || fail "The agent couldn't set itself up. Check the messages above, then run this script again."
+    || incomplete "The agent couldn't set itself up."
 fingerprint="$(printf '%s\n' "$init_out" | sed -n 's/^fingerprint=//p')"
 code="$(printf '%s\n' "$init_out" | sed -n 's/^pairing_code=//p')"
 if [ -z "$fingerprint" ] || [ -z "$code" ]; then
-    fail "The agent's setup output wasn't understood. Download the latest install script and try again."
+    incomplete "The agent's setup output wasn't understood. Download the latest install script."
 fi
 
 echo "Starting the agent..."
 systemctl enable keel-agent >/dev/null 2>&1 \
-    || fail "The agent's service couldn't be enabled. Check the agent logs with: journalctl -u keel-agent"
+    || incomplete "The agent's service couldn't be enabled. Check the agent logs with: journalctl -u keel-agent"
 systemctl restart keel-agent \
-    || fail "The agent's service wouldn't start. Check the agent logs with: journalctl -u keel-agent"
+    || incomplete "The agent's service wouldn't start. Check the agent logs with: journalctl -u keel-agent"
+
+# Wait up to 15 seconds for the agent to listen on its port.
+listening() {
+    systemctl is-active --quiet keel-agent && ss -Htln 2>/dev/null | grep -q ':7443 '
+}
+waited=0
+until listening; do
+    if [ "$waited" -ge 30 ]; then
+        incomplete "The agent started but isn't listening on port 7443. Check the agent logs with: journalctl -u keel-agent"
+    fi
+    sleep 0.5
+    waited=$((waited + 1))
+done
+
+firewall_on=""
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    firewall_on=ufw
+elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall_on=firewalld
+fi
 
 echo
 echo "The Keel agent is installed and running on $host (port 7443)."
 echo "Server fingerprint: $fingerprint"
+if [ -n "$firewall_on" ]; then
+    echo "A firewall ($firewall_on) is on: make sure port 7443/tcp is open to the computer running the Keel app."
+fi
 echo
 echo "Paste this pairing code into the Keel app:"
 printf '%s\n' "$code"
