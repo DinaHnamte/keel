@@ -5,6 +5,9 @@
   import '@fontsource/jetbrains-mono/400.css';
   import '../lib/tokens.css';
   import IconPlus from '@tabler/icons-svelte/icons/plus';
+  import IconLock from '@tabler/icons-svelte/icons/lock';
+  import IconInfoCircle from '@tabler/icons-svelte/icons/info-circle';
+  import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
   import AddServerWizard from '../lib/components/AddServerWizard.svelte';
   import CommandPalette from '../lib/components/CommandPalette.svelte';
@@ -12,11 +15,35 @@
   import { startFleet } from '../lib/fleet.svelte';
   import { ui } from '../lib/ui.svelte';
 
+  type StartupStatus = { fatal: string | null; notice: string | null };
+
   let { children } = $props();
-  onMount(() => startFleet());
+  let started = $state(false);
+  let fatal = $state('');
+  let notice = $state('');
+
+  onMount(() => {
+    let stop: (() => void) | undefined;
+    let disposed = false;
+    (async () => {
+      try {
+        const s = await invoke<StartupStatus>('startup_status');
+        fatal = s.fatal ?? '';
+        notice = s.notice ?? '';
+      } catch (e) {
+        console.error(e);
+      }
+      started = true;
+      if (!fatal && !disposed) stop = startFleet();
+    })();
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  });
 
   function onkeydown(e: KeyboardEvent) {
-    if (!isPaletteShortcut(e)) return;
+    if (fatal || !isPaletteShortcut(e)) return;
     e.preventDefault();
     ui.paletteOpen = !ui.paletteOpen;
   }
@@ -24,6 +51,13 @@
 
 <svelte:window {onkeydown} />
 
+{#if fatal}
+  <main class="fatal">
+    <IconLock size={32} stroke={1.5} aria-hidden="true" />
+    <h1>Keel can't start</h1>
+    <p role="alert">{fatal}</p>
+  </main>
+{:else if started}
 <div class="shell">
   <header class="bar">
     <a class="brand" href="/">Keel</a>
@@ -36,15 +70,23 @@
       </button>
     </div>
   </header>
+  {#if notice}
+    <div class="startup-notice" role="alert">
+      <IconInfoCircle size={16} stroke={2} aria-hidden="true" />
+      <span>{notice}</span>
+      <button class="btn" onclick={() => (notice = '')}>Dismiss</button>
+    </div>
+  {/if}
   <div class="content">
     {@render children()}
   </div>
 </div>
+{/if}
 
-{#if ui.addServerOpen}
+{#if !fatal && ui.addServerOpen}
   <AddServerWizard onclose={() => (ui.addServerOpen = false)} />
 {/if}
-{#if ui.paletteOpen}
+{#if !fatal && ui.paletteOpen}
   <CommandPalette onclose={() => (ui.paletteOpen = false)} />
 {/if}
 
@@ -72,6 +114,39 @@
     font-weight: 600;
     font-size: 16px;
     text-decoration: none;
+  }
+  .fatal {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    height: 100vh;
+    padding: 0 24px;
+    text-align: center;
+    color: var(--ink);
+  }
+  .fatal h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0;
+  }
+  .fatal p {
+    max-width: 480px;
+    margin: 0;
+    color: var(--ink-2);
+  }
+  .startup-notice {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--rule);
+  }
+  .startup-notice span {
+    flex: 1;
   }
   .content {
     flex: 1;

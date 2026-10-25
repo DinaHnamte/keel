@@ -24,3 +24,6 @@ tokio = { workspace = true, features = ["time", "sync", "rt"] }
 zeroize = "1"
 gethostname = "1"
 tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

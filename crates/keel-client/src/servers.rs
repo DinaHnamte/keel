@@ -36,6 +36,32 @@ impl ServerStore {
         Ok(ServerStore { path, records })
     }
 
+    /// Like `load`, but a `servers.json` that can't be parsed is moved aside
+    /// to `servers.json.corrupt-<now>` (or `-<now>-<n>` if that name is
+    /// taken) and an empty store is returned with the new file name, so the
+    /// app can start and tell the person. Other I/O errors are still errors.
+    pub fn load_or_recover(dir: &Path, now: u64) -> io::Result<(ServerStore, Option<String>)> {
+        match ServerStore::load(dir) {
+            Ok(s) => Ok((s, None)),
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                let from = dir.join("servers.json");
+                let mut name = format!("servers.json.corrupt-{now}");
+                let mut n = 1;
+                while dir.join(&name).exists() {
+                    name = format!("servers.json.corrupt-{now}-{n}");
+                    n += 1;
+                }
+                fs::rename(&from, dir.join(&name))?;
+                let store = ServerStore {
+                    path: from,
+                    records: Vec::new(),
+                };
+                Ok((store, Some(name)))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn list(&self) -> &[ServerRecord] {
         &self.records
     }
@@ -125,6 +151,52 @@ mod tests {
             ServerStore::load(dir.path()).unwrap().list(),
             &[rec("b", "two")]
         );
+    }
+
+    #[test]
+    fn recover_moves_a_corrupt_file_aside_and_starts_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("servers.json"), b"{nope").unwrap();
+        let (mut s, moved) = ServerStore::load_or_recover(dir.path(), 1_700_000_000).unwrap();
+        assert!(s.list().is_empty());
+        assert_eq!(moved.as_deref(), Some("servers.json.corrupt-1700000000"));
+        assert_eq!(
+            fs::read(dir.path().join("servers.json.corrupt-1700000000")).unwrap(),
+            b"{nope"
+        );
+        assert!(!dir.path().join("servers.json").exists());
+        // The fresh store writes normally.
+        s.upsert(rec("a", "one")).unwrap();
+        assert_eq!(
+            ServerStore::load(dir.path()).unwrap().list(),
+            &[rec("a", "one")]
+        );
+    }
+
+    #[test]
+    fn recover_leaves_a_good_or_missing_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut s, moved) = ServerStore::load_or_recover(dir.path(), 1).unwrap();
+        assert!(moved.is_none() && s.list().is_empty());
+        s.upsert(rec("a", "one")).unwrap();
+        let (s, moved) = ServerStore::load_or_recover(dir.path(), 2).unwrap();
+        assert!(moved.is_none());
+        assert_eq!(s.list(), &[rec("a", "one")]);
+    }
+
+    #[test]
+    fn recover_does_not_overwrite_an_earlier_corrupt_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("servers.json.corrupt-5"), b"first").unwrap();
+        fs::write(dir.path().join("servers.json"), b"second").unwrap();
+        let (_, moved) = ServerStore::load_or_recover(dir.path(), 5).unwrap();
+        let moved = moved.unwrap();
+        assert_ne!(moved, "servers.json.corrupt-5");
+        assert_eq!(
+            fs::read(dir.path().join("servers.json.corrupt-5")).unwrap(),
+            b"first"
+        );
+        assert_eq!(fs::read(dir.path().join(&moved)).unwrap(), b"second");
     }
 
     #[test]
