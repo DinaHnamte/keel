@@ -158,6 +158,26 @@ describe('AddServerWizard', () => {
     expect(calls('generate_ssh_key')).toHaveLength(1);
   });
 
+  it('reuses a key generated earlier instead of making a new one', async () => {
+    const OLD = 'ssh-ed25519 EARLIER keel';
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'pending_ssh_key') return OLD;
+      if (cmd === 'generate_ssh_key') return KEY;
+      return null;
+    });
+    render(AddServerWizard, { onclose: vi.fn() });
+    expect(await screen.findByDisplayValue(OLD)).toBeInTheDocument();
+    expect(calls('pending_ssh_key')).toHaveLength(1);
+    expect(calls('generate_ssh_key')).toHaveLength(0);
+  });
+
+  it('generates a key on open when none is pending', async () => {
+    render(AddServerWizard, { onclose: vi.fn() });
+    await screen.findByDisplayValue(KEY);
+    expect(calls('pending_ssh_key')).toHaveLength(1);
+    expect(calls('generate_ssh_key')).toHaveLength(1);
+  });
+
   it('generates a new key only on request', async () => {
     render(AddServerWizard, { onclose: vi.fn() });
     await screen.findByDisplayValue(KEY);

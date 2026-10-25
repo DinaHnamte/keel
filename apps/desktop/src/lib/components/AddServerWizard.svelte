@@ -91,6 +91,22 @@
     }
   }
 
+  /** Show the key generated earlier (the person may already have added it), or make one. */
+  async function loadOrGenerateKey() {
+    keyBusy = true;
+    try {
+      const pending = await invoke<string | null>('pending_ssh_key');
+      if (pending) {
+        publicKey = pending;
+        keyBusy = false;
+        return;
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    await generateKey();
+  }
+
   async function copyKey() {
     clearTimeout(copyTimer);
     try {
@@ -231,7 +247,7 @@
         else unlisten = fn;
       })
       .catch((e) => console.error(e));
-    void generateKey();
+    void loadOrGenerateKey();
     return () => {
       disposed = true;
       unlisten?.();
