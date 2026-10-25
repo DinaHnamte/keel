@@ -1,5 +1,5 @@
 /** App-wide UI flags. The add-server wizard (opened from several places) reads `addServerOpen`. */
-export const ui = $state({ addServerOpen: false });
+export const ui = $state({ addServerOpen: false, paletteOpen: false });
 
 /** Open overlays, oldest first. Only the last one should react to Escape. */
 const overlays: symbol[] = [];
